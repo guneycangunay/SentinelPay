@@ -58,7 +58,7 @@ public static class DependencyInjection
         {
             services.AddHttpClient<ProviderHttpGateway>(client =>
             {
-                client.BaseAddress = new Uri(acquirerBaseUrl.EndsWith('/', StringComparison.Ordinal)
+                client.BaseAddress = new Uri(acquirerBaseUrl.EndsWith("/", StringComparison.Ordinal)
                     ? acquirerBaseUrl
                     : $"{acquirerBaseUrl}/");
                 client.Timeout = TimeSpan.FromSeconds(
