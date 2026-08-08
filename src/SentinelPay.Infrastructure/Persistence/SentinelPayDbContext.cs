@@ -122,6 +122,7 @@ public sealed class SentinelPayDbContext : DbContext
         {
             entity.ToTable("captures");
             entity.HasKey(capture => capture.Id);
+            entity.Property(capture => capture.Id).ValueGeneratedNever();
             entity.Property(capture => capture.ProviderReference).HasMaxLength(120).IsRequired();
             entity.Property(capture => capture.IdempotencyKey).HasMaxLength(128).IsRequired();
             entity.Property(capture => capture.RequestHash).HasMaxLength(64).IsFixedLength().IsRequired();
@@ -134,6 +135,7 @@ public sealed class SentinelPayDbContext : DbContext
         {
             entity.ToTable("refunds");
             entity.HasKey(refund => refund.Id);
+            entity.Property(refund => refund.Id).ValueGeneratedNever();
             entity.Property(refund => refund.ProviderReference).HasMaxLength(120).IsRequired();
             entity.Property(refund => refund.IdempotencyKey).HasMaxLength(128).IsRequired();
             entity.Property(refund => refund.RequestHash).HasMaxLength(64).IsFixedLength().IsRequired();
@@ -145,6 +147,7 @@ public sealed class SentinelPayDbContext : DbContext
         {
             entity.ToTable("payment_operations");
             entity.HasKey(operation => operation.Id);
+            entity.Property(operation => operation.Id).ValueGeneratedNever();
             entity.Property(operation => operation.Type).HasConversion<string>().HasMaxLength(32);
             entity.Property(operation => operation.Status).HasConversion<string>().HasMaxLength(32);
             entity.Property(operation => operation.IdempotencyKey).HasMaxLength(128).IsRequired();
