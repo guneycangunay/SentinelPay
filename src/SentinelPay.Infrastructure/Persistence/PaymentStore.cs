@@ -15,6 +15,7 @@ public sealed class PaymentStore : IPaymentStore
 
     public Task<Payment?> GetAsync(Guid merchantId, Guid paymentId, CancellationToken cancellationToken) =>
         _dbContext.Payments
+            .Include(payment => payment.Captures)
             .Include(payment => payment.Refunds)
             .Include(payment => payment.Operations)
             .SingleOrDefaultAsync(
@@ -26,6 +27,7 @@ public sealed class PaymentStore : IPaymentStore
         string idempotencyKey,
         CancellationToken cancellationToken) =>
         _dbContext.Payments
+            .Include(payment => payment.Captures)
             .Include(payment => payment.Refunds)
             .Include(payment => payment.Operations)
             .SingleOrDefaultAsync(
@@ -37,6 +39,7 @@ public sealed class PaymentStore : IPaymentStore
         string providerReference,
         CancellationToken cancellationToken) =>
         _dbContext.Payments
+            .Include(payment => payment.Captures)
             .Include(payment => payment.Refunds)
             .Include(payment => payment.Operations)
             .SingleOrDefaultAsync(

@@ -2,5 +2,10 @@ namespace SentinelPay.Application.Abstractions;
 
 public interface ISandboxGatewayControl
 {
-    void SetState(string providerReference, GatewayPaymentState state, string? errorCode = null, string? errorMessage = null);
+    void SetState(
+        string providerReference,
+        GatewayPaymentState state,
+        long? capturedAmountMinor = null,
+        string? errorCode = null,
+        string? errorMessage = null);
 }

@@ -18,10 +18,11 @@ public sealed class LedgerWriter : ILedgerWriter
 
     public async Task RecordCaptureAsync(
         Payment payment,
+        Capture capture,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        var externalReference = $"capture:{payment.Id:N}";
+        var externalReference = $"capture:{capture.Id:N}";
         if (await ExistsAsync(externalReference, cancellationToken))
         {
             return;
@@ -34,8 +35,8 @@ public sealed class LedgerWriter : ILedgerWriter
             payment.Currency,
             "Capture funds into merchant payable",
             [
-                new LedgerLineDraft(LedgerAccount.ProviderClearing, LedgerDirection.Debit, payment.CapturedAmountMinor),
-                new LedgerLineDraft(LedgerAccount.MerchantPayable, LedgerDirection.Credit, payment.CapturedAmountMinor)
+                new LedgerLineDraft(LedgerAccount.ProviderClearing, LedgerDirection.Debit, capture.AmountMinor),
+                new LedgerLineDraft(LedgerAccount.MerchantPayable, LedgerDirection.Credit, capture.AmountMinor)
             ],
             now);
         await _dbContext.LedgerJournals.AddAsync(journal, cancellationToken);

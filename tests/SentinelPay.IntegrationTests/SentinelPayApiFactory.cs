@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
@@ -6,7 +8,8 @@ namespace SentinelPay.IntegrationTests;
 
 public sealed class SentinelPayApiFactory : WebApplicationFactory<Program>
 {
-    public const string DevelopmentApiKey = "${SENTINELPAY_API_KEY}";
+    public static string DevelopmentApiKey { get; } = DeriveFixtureValue("api-key");
+    public static string WebhookSigningMaterial { get; } = DeriveFixtureValue("webhook-signing");
     private readonly string _postgresConnectionString;
 
     public SentinelPayApiFactory(string postgresConnectionString)
@@ -24,15 +27,21 @@ public sealed class SentinelPayApiFactory : WebApplicationFactory<Program>
                 ["ConnectionStrings:Postgres"] = _postgresConnectionString,
                 ["Redis:Enabled"] = "false",
                 ["Outbox:DispatcherEnabled"] = "false",
+                ["Messaging:ConsumerEnabled"] = "false",
                 ["Reconciliation:Enabled"] = "false",
+                ["PaymentExpiry:Enabled"] = "false",
                 ["Database:InitializeOnStartup"] = "true",
                 ["DevelopmentMerchant:Seed"] = "true",
                 ["DevelopmentMerchant:Id"] = "2dc5f437-0a11-4c67-a810-b3e784470f73",
                 ["DevelopmentMerchant:Name"] = "Acme Commerce Tests",
                 ["DevelopmentMerchant:ApiKey"] = DevelopmentApiKey,
-                ["Webhooks:mock-bank:Secret"] = "${SENTINELPAY_TEST_SIGNING_MATERIAL}",
-                ["Webhooks:sandbox-wallet:Secret"] = "${SENTINELPAY_TEST_SIGNING_MATERIAL}"
+                ["Webhooks:mock-bank:Secret"] = WebhookSigningMaterial,
+                ["Webhooks:sandbox-wallet:Secret"] = WebhookSigningMaterial
             });
         });
     }
+
+    private static string DeriveFixtureValue(string purpose) =>
+        Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes($"{typeof(SentinelPayApiFactory).FullName}:{purpose}")));
 }

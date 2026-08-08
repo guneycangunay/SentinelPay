@@ -7,4 +7,8 @@ public sealed record CreatePaymentRequest(
     string Provider,
     string PaymentMethodToken);
 
+public sealed record ConfirmAuthenticationRequest(string AuthenticationResultToken);
+
+public sealed record CapturePaymentRequest(long AmountMinor);
+
 public sealed record RefundPaymentRequest(long AmountMinor);

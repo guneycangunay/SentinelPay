@@ -9,6 +9,7 @@ using SentinelPay.Infrastructure.Ledger;
 using SentinelPay.Infrastructure.Outbox;
 using SentinelPay.Infrastructure.Payments;
 using SentinelPay.Infrastructure.Persistence;
+using SentinelPay.Infrastructure.Reconciliation;
 using SentinelPay.Infrastructure.Settlements;
 using StackExchange.Redis;
 
@@ -20,8 +21,12 @@ public static class DependencyInjection
         this IServiceCollection services,
         IConfiguration configuration)
     {
-        var connectionString = configuration.GetConnectionString("Postgres")
-            ?? throw new InvalidOperationException("ConnectionStrings:Postgres is required.");
+        var connectionString = configuration.GetConnectionString("Postgres");
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            throw new InvalidOperationException(
+                "ConnectionStrings:Postgres must be supplied through configuration or the environment.");
+        }
 
         services.AddDbContext<SentinelPayDbContext>(options =>
             options.UseNpgsql(
@@ -37,16 +42,33 @@ public static class DependencyInjection
         services.AddScoped<PaymentService>();
         services.AddScoped<SettlementService>();
         services.AddScoped<WebhookService>();
+        services.AddScoped<IReconciliationImportService, ReconciliationImportService>();
         services.AddScoped<DatabaseInitializer>();
         services.AddSingleton<IWebhookSignatureVerifier, HmacWebhookSignatureVerifier>();
         services.AddSingleton<IClock, SystemClock>();
+        services.AddSingleton<ProviderCircuitBreaker>();
 
         services.AddSingleton<IPaymentGateway, MockBankGateway>();
         services.AddSingleton<IPaymentGateway, SandboxWalletGateway>();
         services.AddSingleton<SandboxGatewayStateStore>();
         services.AddSingleton<ISandboxGatewayControl>(provider =>
             provider.GetRequiredService<SandboxGatewayStateStore>());
-        services.AddSingleton<IPaymentGatewayResolver, PaymentGatewayResolver>();
+        var acquirerBaseUrl = configuration["Providers:AcquirerHttp:BaseUrl"];
+        if (!string.IsNullOrWhiteSpace(acquirerBaseUrl))
+        {
+            services.AddHttpClient<ProviderHttpGateway>(client =>
+            {
+                client.BaseAddress = new Uri(acquirerBaseUrl.EndsWith('/', StringComparison.Ordinal)
+                    ? acquirerBaseUrl
+                    : $"{acquirerBaseUrl}/");
+                client.Timeout = TimeSpan.FromSeconds(
+                    configuration.GetValue("Providers:AcquirerHttp:TimeoutSeconds", 3));
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("SentinelPay/2.1");
+            });
+            services.AddScoped<IPaymentGateway>(provider => provider.GetRequiredService<ProviderHttpGateway>());
+        }
+
+        services.AddScoped<IPaymentGatewayResolver, PaymentGatewayResolver>();
 
         if (configuration.GetValue("Redis:Enabled", true))
         {
@@ -66,6 +88,10 @@ public static class DependencyInjection
         if (configuration["Messaging:Provider"]?.Equals("RabbitMq", StringComparison.OrdinalIgnoreCase) == true)
         {
             services.AddSingleton<IEventPublisher, RabbitMqEventPublisher>();
+            if (configuration.GetValue("Messaging:ConsumerEnabled", false))
+            {
+                services.AddHostedService<AuditEventConsumer>();
+            }
         }
         else
         {
@@ -79,6 +105,11 @@ public static class DependencyInjection
         if (configuration.GetValue("Reconciliation:Enabled", true))
         {
             services.AddHostedService<ReconciliationWorker>();
+        }
+
+        if (configuration.GetValue("PaymentExpiry:Enabled", true))
+        {
+            services.AddHostedService<PaymentExpiryWorker>();
         }
 
         return services;

@@ -60,7 +60,9 @@ public sealed class ReconciliationWorker : BackgroundService
             var discoveryDb = discoveryScope.ServiceProvider.GetRequiredService<SentinelPayDbContext>();
             paymentIds = await discoveryDb.Payments
                 .AsNoTracking()
-                .Where(payment => payment.Status == PaymentStatus.Authorized && payment.UpdatedAt <= staleBefore)
+                .Where(payment =>
+                    (payment.Status == PaymentStatus.Authorized || payment.Status == PaymentStatus.PartiallyCaptured) &&
+                    payment.UpdatedAt <= staleBefore)
                 .OrderBy(payment => payment.UpdatedAt)
                 .Select(payment => payment.Id)
                 .Take(_configuration.GetValue("Reconciliation:BatchSize", 50))
@@ -78,9 +80,11 @@ public sealed class ReconciliationWorker : BackgroundService
                 var outbox = scope.ServiceProvider.GetRequiredService<IOutboxWriter>();
                 var ledger = scope.ServiceProvider.GetRequiredService<ILedgerWriter>();
                 var payment = await dbContext.Payments
+                    .Include(item => item.Captures)
                     .Include(item => item.Operations)
                     .SingleOrDefaultAsync(
-                        item => item.Id == paymentId && item.Status == PaymentStatus.Authorized,
+                        item => item.Id == paymentId &&
+                            (item.Status == PaymentStatus.Authorized || item.Status == PaymentStatus.PartiallyCaptured),
                         cancellationToken);
                 if (payment is null)
                 {
@@ -95,16 +99,32 @@ public sealed class ReconciliationWorker : BackgroundService
 
                 switch (external.State)
                 {
+                    case GatewayPaymentState.PartiallyCaptured:
                     case GatewayPaymentState.Captured:
                     {
+                        var externalCaptured = external.CapturedAmountMinor ??
+                            (external.State == GatewayPaymentState.Captured ? payment.AmountMinor : 0);
+                        var captureDelta = externalCaptured - payment.CapturedAmountMinor;
+                        if (captureDelta <= 0)
+                        {
+                            continue;
+                        }
+
+                        var requestHash = HashExternalState(external.State, externalCaptured.ToString());
                         var captureOperation = payment.StartOperation(
                             PaymentOperationType.Reconcile,
-                            $"reconcile:{payment.Id:N}:captured",
-                            HashExternalState(GatewayPaymentState.Captured, null),
+                            $"reconcile:{payment.Id:N}:captured:{externalCaptured}",
+                            requestHash,
                             now);
-                        payment.Capture(payment.AmountMinor, now);
-                        captureOperation.Succeed(payment.ProviderReference, now);
-                        await ledger.RecordCaptureAsync(payment, now, cancellationToken);
+                        var capture = payment.RegisterCapture(
+                            captureOperation.Id,
+                            captureDelta,
+                            $"recon_cap_{captureOperation.Id:N}",
+                            captureOperation.IdempotencyKey,
+                            requestHash,
+                            now);
+                        captureOperation.Succeed(capture.ProviderReference, now);
+                        await ledger.RecordCaptureAsync(payment, capture, now, cancellationToken);
                         outbox.Add(
                             "payment.reconciled-captured.v2",
                             payment.Id,
@@ -112,7 +132,23 @@ public sealed class ReconciliationWorker : BackgroundService
                             now);
                         break;
                     }
-                    case GatewayPaymentState.Failed:
+                    case GatewayPaymentState.Voided:
+                    {
+                        var voidOperation = payment.StartOperation(
+                            PaymentOperationType.Reconcile,
+                            $"reconcile:{payment.Id:N}:voided",
+                            HashExternalState(GatewayPaymentState.Voided, null),
+                            now);
+                        payment.VoidRemainingAuthorization(now);
+                        voidOperation.Succeed(payment.ProviderReference, now);
+                        outbox.Add(
+                            "payment.reconciled-voided.v1",
+                            payment.Id,
+                            new { payment.Id, payment.MerchantId, payment.ProviderReference },
+                            now);
+                        break;
+                    }
+                    case GatewayPaymentState.Failed when payment.Status == PaymentStatus.Authorized:
                     {
                         var failureOperation = payment.StartOperation(
                             PaymentOperationType.Reconcile,
@@ -132,6 +168,9 @@ public sealed class ReconciliationWorker : BackgroundService
                         break;
                     }
                     case GatewayPaymentState.Authorized:
+                    case GatewayPaymentState.RequiresAction:
+                    case GatewayPaymentState.PartiallyCapturedAndVoided:
+                    case GatewayPaymentState.Refunded:
                     case GatewayPaymentState.Unknown:
                     default:
                         continue;

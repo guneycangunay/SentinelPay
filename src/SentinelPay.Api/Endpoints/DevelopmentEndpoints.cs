@@ -14,6 +14,7 @@ public static class DevelopmentEndpoints
                 gatewayControl.SetState(
                     request.ProviderReference,
                     request.State,
+                    request.CapturedAmountMinor,
                     request.ErrorCode,
                     request.ErrorMessage);
                 return Results.Accepted();
@@ -30,5 +31,6 @@ public static class DevelopmentEndpoints
 public sealed record SetProviderStateRequest(
     string ProviderReference,
     GatewayPaymentState State,
+    long? CapturedAmountMinor,
     string? ErrorCode,
     string? ErrorMessage);

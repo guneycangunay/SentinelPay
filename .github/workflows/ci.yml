@@ -45,3 +45,10 @@ jobs:
 
       - name: Build production container
         run: docker build --tag sentinelpay:${{ github.sha }} .
+
+      - name: Build provider simulator container
+        run: >-
+          docker build
+          --file Dockerfile.provider-simulator
+          --tag sentinelpay-provider-simulator:${{ github.sha }}
+          .

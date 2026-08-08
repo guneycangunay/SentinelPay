@@ -16,8 +16,12 @@ export const options = {
 };
 
 const baseUrl = __ENV.BASE_URL || 'http://localhost:8080';
-const apiKey = __ENV.API_KEY || '${SENTINELPAY_API_KEY}';
+const apiKey = __ENV.API_KEY;
 const raceId = __ENV.RACE_ID || 'local-race';
+
+if (!apiKey) {
+  throw new Error('API_KEY environment variable is required.');
+}
 
 export function setup() {
   for (let attempt = 0; attempt < 30; attempt += 1) {

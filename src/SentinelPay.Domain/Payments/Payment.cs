@@ -2,6 +2,7 @@ namespace SentinelPay.Domain.Payments;
 
 public sealed class Payment
 {
+    private readonly List<Capture> _captures = [];
     private readonly List<Refund> _refunds = [];
     private readonly List<PaymentOperation> _operations = [];
 
@@ -45,13 +46,23 @@ public sealed class Payment
     public string RequestHash { get; private set; } = string.Empty;
     public long CapturedAmountMinor { get; private set; }
     public long RefundedAmountMinor { get; private set; }
+    public long VoidedAmountMinor { get; private set; }
+    public string? NextActionType { get; private set; }
+    public string? NextActionUrl { get; private set; }
+    public DateTimeOffset? ActionExpiresAt { get; private set; }
+    public DateTimeOffset? AuthorizationExpiresAt { get; private set; }
     public string? FailureCode { get; private set; }
     public string? FailureMessage { get; private set; }
     public DateTimeOffset CreatedAt { get; private set; }
     public DateTimeOffset UpdatedAt { get; private set; }
     public DateTimeOffset? AuthorizedAt { get; private set; }
     public DateTimeOffset? CapturedAt { get; private set; }
+    public DateTimeOffset? AuthorizationClosedAt { get; private set; }
     public uint Version { get; private set; }
+    public long RemainingAuthorizedAmountMinor => Status is PaymentStatus.Authorized or PaymentStatus.PartiallyCaptured
+        ? AmountMinor - CapturedAmountMinor - VoidedAmountMinor
+        : 0;
+    public IReadOnlyCollection<Capture> Captures => _captures.AsReadOnly();
     public IReadOnlyCollection<Refund> Refunds => _refunds.AsReadOnly();
     public IReadOnlyCollection<PaymentOperation> Operations => _operations.AsReadOnly();
 
@@ -128,8 +139,7 @@ public sealed class Payment
 
         EnsureRequestHash(requestHash);
 
-        if (_operations.Any(operation =>
-                operation.Type == type && operation.IdempotencyKey == normalizedKey))
+        if (_operations.Any(operation => operation.Type == type && operation.IdempotencyKey == normalizedKey))
         {
             throw new DomainException("The payment operation already exists.");
         }
@@ -146,41 +156,150 @@ public sealed class Payment
         return operation;
     }
 
-    public void MarkAuthorized(string providerReference, DateTimeOffset now)
+    public void MarkAuthenticationRequired(
+        string providerReference,
+        string actionType,
+        string actionUrl,
+        DateTimeOffset actionExpiresAt,
+        DateTimeOffset now)
     {
         EnsureStatus(PaymentStatus.Pending);
+        if (actionExpiresAt <= now)
+        {
+            throw new DomainException("Authentication action expiry must be in the future.");
+        }
+
+        ProviderReference = RequireProviderReference(providerReference);
+        NextActionType = RequireBounded(actionType, 40, "Next action type");
+        NextActionUrl = RequireAbsoluteHttpsUrl(actionUrl);
+        ActionExpiresAt = actionExpiresAt;
+        Status = PaymentStatus.RequiresAction;
+        UpdatedAt = now;
+    }
+
+    public void MarkAuthorized(string providerReference, DateTimeOffset authorizationExpiresAt, DateTimeOffset now)
+    {
+        if (Status is not (PaymentStatus.Pending or PaymentStatus.RequiresAction))
+        {
+            throw new DomainException($"A payment in '{Status}' state cannot be authorized.");
+        }
+
+        if (authorizationExpiresAt <= now)
+        {
+            throw new DomainException("Authorization expiry must be in the future.");
+        }
+
         ProviderReference = RequireProviderReference(providerReference);
         Status = PaymentStatus.Authorized;
         AuthorizedAt = now;
+        AuthorizationExpiresAt = authorizationExpiresAt;
+        ClearNextAction();
         UpdatedAt = now;
     }
 
     public void MarkFailed(string code, string message, DateTimeOffset now)
     {
-        if (Status is not (PaymentStatus.Pending or PaymentStatus.Authorized))
+        if (Status is not (PaymentStatus.Pending or PaymentStatus.RequiresAction or PaymentStatus.Authorized))
         {
             throw new DomainException($"A payment in '{Status}' state cannot fail.");
         }
 
-        var normalizedCode = string.IsNullOrWhiteSpace(code) ? "provider_error" : code.Trim();
-        FailureCode = normalizedCode[..Math.Min(normalizedCode.Length, 80)];
-        FailureMessage = message[..Math.Min(message.Length, 500)];
+        FailureCode = Truncate(string.IsNullOrWhiteSpace(code) ? "provider_error" : code.Trim(), 80);
+        FailureMessage = Truncate(message ?? "Provider operation failed.", 500);
         Status = PaymentStatus.Failed;
+        ClearNextAction();
+        AuthorizationClosedAt = now;
         UpdatedAt = now;
     }
 
-    public void Capture(long amountMinor, DateTimeOffset now)
+    public Capture RegisterCapture(
+        Guid captureId,
+        long amountMinor,
+        string providerReference,
+        string idempotencyKey,
+        string requestHash,
+        DateTimeOffset now)
     {
-        EnsureStatus(PaymentStatus.Authorized);
+        EnsureCanCapture(amountMinor, now);
+        ValidateOperationIdentity(idempotencyKey, requestHash, "Capture");
 
-        if (amountMinor != AmountMinor)
+        var capture = new Capture(
+            captureId,
+            Id,
+            amountMinor,
+            RequireProviderReference(providerReference),
+            idempotencyKey.Trim(),
+            requestHash,
+            now);
+        _captures.Add(capture);
+        CapturedAmountMinor += amountMinor;
+        Status = RemainingAuthorizedAmountMinor == 0 ? PaymentStatus.Captured : PaymentStatus.PartiallyCaptured;
+        if (Status == PaymentStatus.Captured)
         {
-            throw new DomainException("SentinelPay currently supports full capture only.");
+            CapturedAt = now;
+            AuthorizationClosedAt = now;
         }
 
-        CapturedAmountMinor = amountMinor;
-        Status = PaymentStatus.Captured;
-        CapturedAt = now;
+        UpdatedAt = now;
+        return capture;
+    }
+
+    public void EnsureCanCapture(long amountMinor, DateTimeOffset now)
+    {
+        if (Status is not (PaymentStatus.Authorized or PaymentStatus.PartiallyCaptured))
+        {
+            throw new DomainException($"A payment in '{Status}' state cannot be captured.");
+        }
+
+        if (AuthorizationExpiresAt is not null && AuthorizationExpiresAt <= now)
+        {
+            throw new DomainException("The authorization has expired and cannot be captured.");
+        }
+
+        var remaining = RemainingAuthorizedAmountMinor;
+        if (amountMinor <= 0 || amountMinor > remaining)
+        {
+            throw new DomainException($"Capture amount must be between 1 and {remaining} minor units.");
+        }
+    }
+
+    public void VoidRemainingAuthorization(DateTimeOffset now)
+    {
+        if (Status is not (PaymentStatus.Authorized or PaymentStatus.PartiallyCaptured))
+        {
+            throw new DomainException($"A payment in '{Status}' state cannot be voided.");
+        }
+
+        var remaining = RemainingAuthorizedAmountMinor;
+        if (remaining <= 0)
+        {
+            throw new DomainException("The payment has no remaining authorization to void.");
+        }
+
+        VoidedAmountMinor += remaining;
+        Status = CapturedAmountMinor == 0 ? PaymentStatus.Voided : PaymentStatus.PartiallyCapturedAndVoided;
+        AuthorizationClosedAt = now;
+        UpdatedAt = now;
+    }
+
+    public void Expire(DateTimeOffset now)
+    {
+        var expiry = Status == PaymentStatus.RequiresAction ? ActionExpiresAt : AuthorizationExpiresAt;
+        if (Status is not (PaymentStatus.RequiresAction or PaymentStatus.Authorized or PaymentStatus.PartiallyCaptured) ||
+            expiry is null ||
+            expiry > now)
+        {
+            throw new DomainException($"A payment in '{Status}' state is not eligible for expiry.");
+        }
+
+        if (Status != PaymentStatus.RequiresAction)
+        {
+            VoidedAmountMinor += RemainingAuthorizedAmountMinor;
+        }
+
+        Status = CapturedAmountMinor == 0 ? PaymentStatus.Expired : PaymentStatus.PartiallyCapturedAndVoided;
+        ClearNextAction();
+        AuthorizationClosedAt = now;
         UpdatedAt = now;
     }
 
@@ -193,21 +312,14 @@ public sealed class Payment
         DateTimeOffset now)
     {
         EnsureCanRefund(amountMinor);
-
-        var normalizedKey = idempotencyKey?.Trim() ?? string.Empty;
-        if (normalizedKey.Length is < 8 or > 128)
-        {
-            throw new DomainException("Refund idempotency key length must be between 8 and 128 characters.");
-        }
-
-        EnsureRequestHash(requestHash);
+        ValidateOperationIdentity(idempotencyKey, requestHash, "Refund");
 
         var refund = new Refund(
             refundId,
             Id,
             amountMinor,
             RequireProviderReference(providerReference),
-            normalizedKey,
+            idempotencyKey.Trim(),
             requestHash,
             now);
         _refunds.Add(refund);
@@ -221,9 +333,10 @@ public sealed class Payment
 
     public void EnsureCanRefund(long amountMinor)
     {
-        if (Status is not (PaymentStatus.Captured or PaymentStatus.PartiallyRefunded))
+        if (Status is not (PaymentStatus.Captured or PaymentStatus.PartiallyCapturedAndVoided or PaymentStatus.PartiallyRefunded))
         {
-            throw new DomainException($"A payment in '{Status}' state cannot be refunded.");
+            throw new DomainException(
+                $"A payment in '{Status}' state cannot be refunded. Close any remaining authorization first.");
         }
 
         var remaining = CapturedAmountMinor - RefundedAmountMinor;
@@ -241,15 +354,52 @@ public sealed class Payment
         }
     }
 
-    private static string RequireProviderReference(string providerReference)
+    private void ClearNextAction()
     {
-        var normalized = providerReference?.Trim() ?? string.Empty;
-        if (normalized.Length is 0 or > 120)
+        NextActionType = null;
+        NextActionUrl = null;
+        ActionExpiresAt = null;
+    }
+
+    private static string RequireProviderReference(string providerReference) =>
+        RequireBounded(providerReference, 120, "Provider reference");
+
+    private static string RequireBounded(string value, int maxLength, string fieldName)
+    {
+        var normalized = value?.Trim() ?? string.Empty;
+        if (normalized.Length is 0 || normalized.Length > maxLength)
         {
-            throw new DomainException("Provider reference is required and cannot exceed 120 characters.");
+            throw new DomainException($"{fieldName} is required and cannot exceed {maxLength} characters.");
         }
 
         return normalized;
+    }
+
+    private static string RequireAbsoluteHttpsUrl(string value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+        {
+            throw new DomainException("Next action URL must be an absolute HTTPS URL.");
+        }
+
+        var normalized = uri.ToString();
+        if (normalized.Length > 1000)
+        {
+            throw new DomainException("Next action URL cannot exceed 1000 characters.");
+        }
+
+        return normalized;
+    }
+
+    private static void ValidateOperationIdentity(string idempotencyKey, string requestHash, string operationName)
+    {
+        var normalizedKey = idempotencyKey?.Trim() ?? string.Empty;
+        if (normalizedKey.Length is < 8 or > 128)
+        {
+            throw new DomainException($"{operationName} idempotency key length must be between 8 and 128 characters.");
+        }
+
+        EnsureRequestHash(requestHash);
     }
 
     private static void EnsureRequestHash(string requestHash)
@@ -259,4 +409,7 @@ public sealed class Payment
             throw new DomainException("Request hash must be a 64-character hexadecimal SHA-256 digest.");
         }
     }
+
+    private static string Truncate(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength];
 }

@@ -5,7 +5,9 @@ public enum PaymentOperationType
     Authorize = 0,
     Capture = 1,
     Refund = 2,
-    Reconcile = 3
+    Reconcile = 3,
+    ConfirmAuthentication = 4,
+    Void = 5
 }
 
 public enum PaymentOperationStatus

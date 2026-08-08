@@ -33,6 +33,20 @@ public static class PaymentEndpoints
             .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
             .RequireAuthorization(SentinelPayPolicies.PaymentsWrite);
 
+        group.MapPost("/{paymentId:guid}/confirm", ConfirmAuthenticationAsync)
+            .WithName("ConfirmPaymentAuthentication")
+            .WithSummary("Confirm a 3DS cardholder authentication result")
+            .Produces<PaymentResponse>()
+            .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+            .RequireAuthorization(SentinelPayPolicies.PaymentsWrite);
+
+        group.MapPost("/{paymentId:guid}/void", VoidPaymentAsync)
+            .WithName("VoidPaymentAuthorization")
+            .WithSummary("Void the uncaptured authorization remainder")
+            .Produces<PaymentResponse>()
+            .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+            .RequireAuthorization(SentinelPayPolicies.PaymentsWrite);
+
         group.MapPost("/{paymentId:guid}/refunds", RefundPaymentAsync)
             .WithName("RefundPayment")
             .WithSummary("Partially or fully refund a captured payment")
@@ -108,12 +122,48 @@ public static class PaymentEndpoints
 
     private static async Task<IResult> CapturePaymentAsync(
         Guid paymentId,
+        CapturePaymentRequest request,
         HttpContext context,
         PaymentService paymentService,
         CancellationToken cancellationToken)
     {
         var result = await paymentService.CaptureAsync(
-            new CapturePaymentCommand(context.GetMerchantId(), paymentId, RequireIdempotencyKey(context)),
+            new CapturePaymentCommand(
+                context.GetMerchantId(),
+                paymentId,
+                request.AmountMinor,
+                RequireIdempotencyKey(context)),
+            cancellationToken);
+        SetReplayHeader(context, result.IsReplay);
+        return Results.Ok(result.Payment);
+    }
+
+    private static async Task<IResult> ConfirmAuthenticationAsync(
+        Guid paymentId,
+        ConfirmAuthenticationRequest request,
+        HttpContext context,
+        PaymentService paymentService,
+        CancellationToken cancellationToken)
+    {
+        var result = await paymentService.ConfirmAuthenticationAsync(
+            new ConfirmAuthenticationCommand(
+                context.GetMerchantId(),
+                paymentId,
+                request.AuthenticationResultToken,
+                RequireIdempotencyKey(context)),
+            cancellationToken);
+        SetReplayHeader(context, result.IsReplay);
+        return Results.Ok(result.Payment);
+    }
+
+    private static async Task<IResult> VoidPaymentAsync(
+        Guid paymentId,
+        HttpContext context,
+        PaymentService paymentService,
+        CancellationToken cancellationToken)
+    {
+        var result = await paymentService.VoidAsync(
+            new VoidPaymentCommand(context.GetMerchantId(), paymentId, RequireIdempotencyKey(context)),
             cancellationToken);
         SetReplayHeader(context, result.IsReplay);
         return Results.Ok(result.Payment);

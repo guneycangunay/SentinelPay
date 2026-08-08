@@ -54,7 +54,7 @@ public sealed class DatabaseInitializer
                 MerchantId = merchantId,
                 Name = "development-full-access",
                 KeyHash = keyHash,
-                Scopes = "payments:read payments:write ledger:read settlements:read settlements:write",
+                Scopes = "payments:read payments:write ledger:read settlements:read settlements:write reconciliation:write",
                 CreatedAt = _clock.UtcNow
             }, cancellationToken);
         }

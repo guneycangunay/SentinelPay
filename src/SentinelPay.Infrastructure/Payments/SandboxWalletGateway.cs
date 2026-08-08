@@ -21,28 +21,61 @@ public sealed class SandboxWalletGateway : IPaymentGateway
 
         if (request.PaymentMethodToken.Equals("wallet_locked", StringComparison.OrdinalIgnoreCase))
         {
-            return new GatewayAuthorizationResult(false, null, "wallet_locked", "The wallet is locked.");
+            return new GatewayAuthorizationResult(
+                GatewayAuthorizationState.Declined,
+                null,
+                null,
+                "wallet_locked",
+                "The wallet is locked.");
         }
 
-        var result = new GatewayAuthorizationResult(
-            true,
-            DeterministicReference.Create(
-                "sw_auth",
-                request.PaymentId.ToString("N"),
-                request.IdempotencyKey),
+        var providerReference = DeterministicReference.Create(
+            "sw_auth",
+            request.PaymentId.ToString("N"),
+            request.IdempotencyKey);
+        _stateStore.SetAuthorized(providerReference, request.AmountMinor);
+        return new GatewayAuthorizationResult(
+            GatewayAuthorizationState.Authorized,
+            providerReference,
+            null,
             null,
             null);
-        _stateStore.SetState(result.ProviderReference!, GatewayPaymentState.Authorized);
-        return result;
     }
+
+    public Task<GatewayAuthorizationResult> CompleteAuthenticationAsync(
+        GatewayAuthenticationRequest request,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(new GatewayAuthorizationResult(
+            GatewayAuthorizationState.Declined,
+            null,
+            null,
+            "authentication_not_supported",
+            "The sandbox wallet does not use cardholder authentication."));
 
     public async Task<GatewayOperationResult> CaptureAsync(
         GatewayCaptureRequest request,
         CancellationToken cancellationToken)
     {
         await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
-        _stateStore.SetState(request.ProviderReference, GatewayPaymentState.Captured);
-        return new GatewayOperationResult(true, null, null);
+        _stateStore.AddCapture(request.ProviderReference, request.AmountMinor);
+        return new GatewayOperationResult(
+            true,
+            DeterministicReference.Create("sw_cap", request.CaptureId.ToString("N"), request.IdempotencyKey),
+            null,
+            null);
+    }
+
+    public async Task<GatewayOperationResult> VoidAsync(
+        GatewayVoidRequest request,
+        CancellationToken cancellationToken)
+    {
+        await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken);
+        _stateStore.CloseAuthorization(request.ProviderReference);
+        return new GatewayOperationResult(
+            true,
+            DeterministicReference.Create("sw_void", request.PaymentId.ToString("N"), request.IdempotencyKey),
+            null,
+            null);
     }
 
     public async Task<GatewayRefundResult> RefundAsync(
@@ -52,7 +85,7 @@ public sealed class SandboxWalletGateway : IPaymentGateway
         await Task.Delay(TimeSpan.FromMilliseconds(30), cancellationToken);
         return new GatewayRefundResult(
             true,
-            DeterministicReference.Create("sw_ref", request.PaymentId.ToString("N"), request.IdempotencyKey),
+            DeterministicReference.Create("sw_ref", request.RefundId.ToString("N"), request.IdempotencyKey),
             null,
             null);
     }

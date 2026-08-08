@@ -100,19 +100,45 @@ public sealed class RabbitMqEventPublisher : IEventPublisher, IAsyncDisposable
             cancellationToken);
 
         var exchange = _configuration["Messaging:Exchange"] ?? "sentinelpay.events";
-        var auditQueue = _configuration["Messaging:AuditQueue"] ?? "sentinelpay.audit";
+        var auditQueue = _configuration["Messaging:AuditQueue"] ?? "sentinelpay.audit.v2";
+        var deadLetterExchange = _configuration["Messaging:DeadLetterExchange"] ?? "sentinelpay.dead-letter";
+        var deadLetterQueue = _configuration["Messaging:AuditDeadLetterQueue"] ?? "sentinelpay.audit.dlq";
+        const string deadLetterRoutingKey = "audit.poison";
         await _channel.ExchangeDeclareAsync(
             exchange,
             ExchangeType.Topic,
             durable: true,
             autoDelete: false,
             cancellationToken: cancellationToken);
+        await _channel.ExchangeDeclareAsync(
+            deadLetterExchange,
+            ExchangeType.Direct,
+            durable: true,
+            autoDelete: false,
+            cancellationToken: cancellationToken);
+        await _channel.QueueDeclareAsync(
+            deadLetterQueue,
+            durable: true,
+            exclusive: false,
+            autoDelete: false,
+            arguments: null,
+            cancellationToken: cancellationToken);
+        await _channel.QueueBindAsync(
+            deadLetterQueue,
+            deadLetterExchange,
+            deadLetterRoutingKey,
+            arguments: null,
+            cancellationToken: cancellationToken);
         await _channel.QueueDeclareAsync(
             auditQueue,
             durable: true,
             exclusive: false,
             autoDelete: false,
-            arguments: null,
+            arguments: new Dictionary<string, object?>
+            {
+                ["x-dead-letter-exchange"] = deadLetterExchange,
+                ["x-dead-letter-routing-key"] = deadLetterRoutingKey
+            },
             cancellationToken: cancellationToken);
         await _channel.QueueBindAsync(
             auditQueue,

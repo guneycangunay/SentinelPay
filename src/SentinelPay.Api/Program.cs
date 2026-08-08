@@ -30,7 +30,10 @@ builder.Services.AddAuthorizationBuilder()
     .AddPolicy(SentinelPayPolicies.PaymentsWrite, policy => policy.RequireClaim("scope", SentinelPayPolicies.PaymentsWrite))
     .AddPolicy(SentinelPayPolicies.LedgerRead, policy => policy.RequireClaim("scope", SentinelPayPolicies.LedgerRead))
     .AddPolicy(SentinelPayPolicies.SettlementsRead, policy => policy.RequireClaim("scope", SentinelPayPolicies.SettlementsRead))
-    .AddPolicy(SentinelPayPolicies.SettlementsWrite, policy => policy.RequireClaim("scope", SentinelPayPolicies.SettlementsWrite));
+    .AddPolicy(SentinelPayPolicies.SettlementsWrite, policy => policy.RequireClaim("scope", SentinelPayPolicies.SettlementsWrite))
+    .AddPolicy(
+        SentinelPayPolicies.ReconciliationWrite,
+        policy => policy.RequireClaim("scope", SentinelPayPolicies.ReconciliationWrite));
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -65,7 +68,7 @@ builder.Services.AddOpenTelemetry()
     })
     .WithMetrics(metrics =>
     {
-        metrics.AddMeter(PaymentTelemetry.MeterName, "SentinelPay.Outbox");
+        metrics.AddMeter(PaymentTelemetry.MeterName, "SentinelPay.Outbox", "SentinelPay.Provider");
         metrics.AddAspNetCoreInstrumentation();
         metrics.AddHttpClientInstrumentation();
         metrics.AddRuntimeInstrumentation();
@@ -113,6 +116,7 @@ app.MapGet("/health/ready", async (SentinelPayDbContext dbContext, CancellationT
 app.MapPrometheusScrapingEndpoint("/metrics");
 app.MapPaymentEndpoints();
 app.MapFinanceEndpoints();
+app.MapReconciliationEndpoints();
 if (app.Environment.IsDevelopment())
 {
     app.MapDevelopmentEndpoints();

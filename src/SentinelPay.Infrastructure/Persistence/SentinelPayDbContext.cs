@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using SentinelPay.Domain.Ledger;
 using SentinelPay.Domain.Merchants;
 using SentinelPay.Domain.Payments;
+using SentinelPay.Domain.Reconciliation;
 using SentinelPay.Domain.Settlements;
 using SentinelPay.Infrastructure.Security;
 
@@ -14,6 +15,7 @@ public sealed class SentinelPayDbContext : DbContext
     }
 
     public DbSet<Payment> Payments => Set<Payment>();
+    public DbSet<Capture> Captures => Set<Capture>();
     public DbSet<Refund> Refunds => Set<Refund>();
     public DbSet<PaymentOperation> PaymentOperations => Set<PaymentOperation>();
     public DbSet<Merchant> Merchants => Set<Merchant>();
@@ -23,6 +25,9 @@ public sealed class SentinelPayDbContext : DbContext
     public DbSet<SettlementBatch> SettlementBatches => Set<SettlementBatch>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
     public DbSet<WebhookReceipt> WebhookReceipts => Set<WebhookReceipt>();
+    public DbSet<ConsumedEvent> ConsumedEvents => Set<ConsumedEvent>();
+    public DbSet<ReconciliationReport> ReconciliationReports => Set<ReconciliationReport>();
+    public DbSet<ReconciliationIssue> ReconciliationIssues => Set<ReconciliationIssue>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -59,6 +64,8 @@ public sealed class SentinelPayDbContext : DbContext
             entity.Property(payment => payment.Currency).HasMaxLength(3).IsFixedLength().IsRequired();
             entity.Property(payment => payment.Provider).HasMaxLength(40).IsRequired();
             entity.Property(payment => payment.ProviderReference).HasMaxLength(120);
+            entity.Property(payment => payment.NextActionType).HasMaxLength(40);
+            entity.Property(payment => payment.NextActionUrl).HasMaxLength(1000);
             entity.Property(payment => payment.IdempotencyKey).HasMaxLength(128).IsRequired();
             entity.Property(payment => payment.RequestHash).HasMaxLength(64).IsFixedLength().IsRequired();
             entity.Property(payment => payment.Status).HasConversion<string>().HasMaxLength(32);
@@ -77,6 +84,12 @@ public sealed class SentinelPayDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
             entity.Navigation(payment => payment.Refunds)
                 .UsePropertyAccessMode(PropertyAccessMode.Field);
+            entity.HasMany(payment => payment.Captures)
+                .WithOne()
+                .HasForeignKey(capture => capture.PaymentId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.Navigation(payment => payment.Captures)
+                .UsePropertyAccessMode(PropertyAccessMode.Field);
             entity.HasMany(payment => payment.Operations)
                 .WithOne()
                 .HasForeignKey(operation => operation.PaymentId)
@@ -87,6 +100,18 @@ public sealed class SentinelPayDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(payment => payment.MerchantId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<Capture>(entity =>
+        {
+            entity.ToTable("captures");
+            entity.HasKey(capture => capture.Id);
+            entity.Property(capture => capture.ProviderReference).HasMaxLength(120).IsRequired();
+            entity.Property(capture => capture.IdempotencyKey).HasMaxLength(128).IsRequired();
+            entity.Property(capture => capture.RequestHash).HasMaxLength(64).IsFixedLength().IsRequired();
+            entity.HasIndex(capture => new { capture.PaymentId, capture.IdempotencyKey }).IsUnique();
+            entity.HasIndex(capture => new { capture.PaymentId, capture.CreatedAt });
+            entity.HasIndex(capture => capture.ProviderReference).IsUnique();
         });
 
         modelBuilder.Entity<Refund>(entity =>
@@ -212,6 +237,54 @@ public sealed class SentinelPayDbContext : DbContext
             entity.Property(receipt => receipt.EventType).HasMaxLength(160).IsRequired();
             entity.Property(receipt => receipt.PayloadHash).HasMaxLength(64).IsFixedLength().IsRequired();
             entity.HasIndex(receipt => new { receipt.Provider, receipt.EventId }).IsUnique();
+        });
+
+        modelBuilder.Entity<ConsumedEvent>(entity =>
+        {
+            entity.ToTable("consumed_events");
+            entity.HasKey(message => message.Id);
+            entity.Property(message => message.Consumer).HasMaxLength(120).IsRequired();
+            entity.Property(message => message.EventId).HasMaxLength(160).IsRequired();
+            entity.Property(message => message.EventType).HasMaxLength(160).IsRequired();
+            entity.Property(message => message.PayloadSha256).HasMaxLength(64).IsFixedLength().IsRequired();
+            entity.HasIndex(message => new { message.Consumer, message.EventId }).IsUnique();
+            entity.HasIndex(message => new { message.EventType, message.ReceivedAt });
+        });
+
+        modelBuilder.Entity<ReconciliationReport>(entity =>
+        {
+            entity.ToTable("reconciliation_reports");
+            entity.HasKey(report => report.Id);
+            entity.Property(report => report.Provider).HasMaxLength(40).IsRequired();
+            entity.Property(report => report.SourceFileName).HasMaxLength(240).IsRequired();
+            entity.Property(report => report.SourceSha256).HasMaxLength(64).IsFixedLength().IsRequired();
+            entity.Property(report => report.Status).HasConversion<string>().HasMaxLength(32);
+            entity.HasIndex(report => new { report.MerchantId, report.Provider, report.SourceSha256 }).IsUnique();
+            entity.HasIndex(report => new { report.MerchantId, report.CreatedAt });
+            entity.HasOne<Merchant>()
+                .WithMany()
+                .HasForeignKey(report => report.MerchantId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasMany(report => report.Issues)
+                .WithOne()
+                .HasForeignKey(issue => issue.ReportId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.Navigation(report => report.Issues)
+                .UsePropertyAccessMode(PropertyAccessMode.Field);
+        });
+
+        modelBuilder.Entity<ReconciliationIssue>(entity =>
+        {
+            entity.ToTable("reconciliation_issues");
+            entity.HasKey(issue => issue.Id);
+            entity.Property(issue => issue.Type).HasConversion<string>().HasMaxLength(40);
+            entity.Property(issue => issue.ProviderReference).HasMaxLength(120).IsRequired();
+            entity.Property(issue => issue.Details).HasMaxLength(1000).IsRequired();
+            entity.HasIndex(issue => new { issue.ReportId, issue.Type });
+            entity.HasOne<Payment>()
+                .WithMany()
+                .HasForeignKey(issue => issue.PaymentId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
     }
 }

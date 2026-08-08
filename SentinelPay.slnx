@@ -4,6 +4,7 @@
     <Project Path="src/SentinelPay.Application/SentinelPay.Application.csproj" />
     <Project Path="src/SentinelPay.Domain/SentinelPay.Domain.csproj" />
     <Project Path="src/SentinelPay.Infrastructure/SentinelPay.Infrastructure.csproj" />
+    <Project Path="src/SentinelPay.ProviderSimulator/SentinelPay.ProviderSimulator.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/SentinelPay.Domain.Tests/SentinelPay.Domain.Tests.csproj" />

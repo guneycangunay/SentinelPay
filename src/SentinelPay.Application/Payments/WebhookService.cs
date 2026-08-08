@@ -71,6 +71,8 @@ public sealed class WebhookService
         if (webhook.Id.Length > 160 ||
             webhook.Type.Length > 160 ||
             webhook.ProviderReference.Length > 120 ||
+            (webhook.ProviderOperationReference is not null && webhook.ProviderOperationReference.Length > 120) ||
+            (webhook.AmountMinor is not null && webhook.AmountMinor <= 0) ||
             (webhook.ErrorCode is not null && webhook.ErrorCode.Length > 80))
         {
             throw new InvalidWebhookPayloadException("Webhook field length exceeds the provider contract.");
@@ -102,17 +104,38 @@ public sealed class WebhookService
 
         switch (webhook.Type.ToLowerInvariant())
         {
-            case "payment.captured" when payment.Status == PaymentStatus.Authorized:
-                payment.Capture(payment.AmountMinor, _clock.UtcNow);
-                await _ledger.RecordCaptureAsync(payment, _clock.UtcNow, cancellationToken);
+            case "payment.authentication_succeeded" when payment.Status == PaymentStatus.RequiresAction:
+                payment.MarkAuthorized(webhook.ProviderReference, _clock.UtcNow.AddDays(7), _clock.UtcNow);
                 break;
-            case "payment.failed" when payment.Status is PaymentStatus.Pending or PaymentStatus.Authorized:
+            case "payment.authentication_failed" when payment.Status == PaymentStatus.RequiresAction:
+                payment.MarkFailed(
+                    webhook.ErrorCode ?? "authentication_failed",
+                    webhook.ErrorMessage ?? "The issuer challenge was not completed.",
+                    _clock.UtcNow);
+                break;
+            case "payment.captured" when payment.Status is PaymentStatus.Authorized or PaymentStatus.PartiallyCaptured:
+            {
+                var captureAmount = webhook.AmountMinor ?? payment.RemainingAuthorizedAmountMinor;
+                var capture = payment.RegisterCapture(
+                    operation.Id,
+                    captureAmount,
+                    webhook.ProviderOperationReference ?? $"whcap_{operationIdentity[..32].ToLowerInvariant()}",
+                    operation.IdempotencyKey,
+                    payloadHash,
+                    _clock.UtcNow);
+                await _ledger.RecordCaptureAsync(payment, capture, _clock.UtcNow, cancellationToken);
+                break;
+            }
+            case "payment.failed" when payment.Status is PaymentStatus.Pending or PaymentStatus.RequiresAction or PaymentStatus.Authorized:
                 payment.MarkFailed(
                     webhook.ErrorCode ?? "provider_webhook_failure",
                     webhook.ErrorMessage ?? "The provider reported that the payment failed.",
                     _clock.UtcNow);
                 break;
-            case "payment.captured" or "payment.failed":
+            case "payment.authentication_succeeded" or
+                 "payment.authentication_failed" or
+                 "payment.captured" or
+                 "payment.failed":
                 break; // A valid duplicate state transition is acknowledged and recorded.
             default:
                 throw new InvalidWebhookPayloadException($"Webhook event type '{webhook.Type}' is not supported.");
@@ -147,6 +170,8 @@ public sealed class WebhookService
         string Id,
         string Type,
         string ProviderReference,
+        string? ProviderOperationReference,
+        long? AmountMinor,
         string? ErrorCode,
         string? ErrorMessage);
 }

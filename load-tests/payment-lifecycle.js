@@ -25,7 +25,11 @@ export const options = {
 };
 
 const baseUrl = __ENV.BASE_URL || 'http://localhost:8080';
-const apiKey = __ENV.API_KEY || '${SENTINELPAY_API_KEY}';
+const apiKey = __ENV.API_KEY;
+
+if (!apiKey) {
+  throw new Error('API_KEY environment variable is required.');
+}
 
 export function setup() {
   for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -80,7 +84,7 @@ export default function () {
 
   const capture = http.post(
     `${baseUrl}/api/v1/payments/${paymentId}/capture`,
-    null,
+    JSON.stringify({ amountMinor: 12990 }),
     { headers: headers(`k6-capture-${operationId}`), tags: { operation: 'capture' } },
   );
   check(capture, {

@@ -17,7 +17,7 @@ services:
     image: grafana/grafana:12.1.0
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: ${SENTINELPAY_GRAFANA_ADMIN_PASSWORD:?required}
+      GF_SECURITY_ADMIN_PASSWORD: "${SENTINELPAY_GRAFANA_ADMIN_PASSWORD:?required}"
       GF_USERS_ALLOW_SIGN_UP: "false"
     ports:
       - "3000:3000"

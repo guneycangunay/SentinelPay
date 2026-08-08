@@ -138,14 +138,14 @@ public sealed class PaymentApiTests : IAsyncLifetime
 
         using var captureMessage = CreatePost(
             $"/api/v1/payments/{paymentId}/capture",
-            body: null,
+            new { amountMinor = 12_990 },
             "capture-lifecycle-0001");
         using var captureResponse = await Client.SendAsync(captureMessage);
         Assert.Equal(HttpStatusCode.OK, captureResponse.StatusCode);
 
         using var invalidRefundMessage = CreatePost(
             $"/api/v1/payments/{paymentId}/refunds",
-            new { amountMinor = 9_000 },
+            new { amountMinor = 14_000 },
             "refund-ledger-invalid-0001");
         using var invalidRefundResponse = await Client.SendAsync(invalidRefundMessage);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, invalidRefundResponse.StatusCode);
@@ -262,7 +262,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
 
         using var captureMessage = CreatePost(
             $"/api/v1/payments/{paymentId}/capture",
-            body: null,
+            new { amountMinor = 8_000 },
             "capture-ledger-0001");
         using var captureResponse = await Client.SendAsync(captureMessage);
         Assert.Equal(HttpStatusCode.OK, captureResponse.StatusCode);
@@ -312,6 +312,122 @@ public sealed class PaymentApiTests : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public async Task ThreeDsChallenge_CanBeConfirmedIdempotently()
+    {
+        var request = new
+        {
+            merchantReference = "order-3ds-1",
+            amountMinor = 15_000,
+            currency = "EUR",
+            provider = "mock-bank",
+            paymentMethodToken = "tok_3ds_challenge"
+        };
+        using var createMessage = CreatePost("/api/v1/payments", request, "create-3ds-0001");
+        using var createResponse = await Client.SendAsync(createMessage);
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        var created = await ReadJsonAsync(createResponse);
+        Assert.Equal("RequiresAction", created.RootElement.GetProperty("status").GetString());
+        Assert.Equal("redirect", created.RootElement.GetProperty("nextAction").GetProperty("type").GetString());
+        var paymentId = created.RootElement.GetProperty("id").GetGuid();
+
+        using var confirmMessage = CreatePost(
+            $"/api/v1/payments/{paymentId}/confirm",
+            new { authenticationResultToken = "auth_success" },
+            "confirm-3ds-0001");
+        using var confirmResponse = await Client.SendAsync(confirmMessage);
+        Assert.Equal(HttpStatusCode.OK, confirmResponse.StatusCode);
+        var confirmed = await ReadJsonAsync(confirmResponse);
+        Assert.Equal("Authorized", confirmed.RootElement.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, confirmed.RootElement.GetProperty("nextAction").ValueKind);
+
+        using var replayMessage = CreatePost(
+            $"/api/v1/payments/{paymentId}/confirm",
+            new { authenticationResultToken = "auth_success" },
+            "confirm-3ds-0001");
+        using var replayResponse = await Client.SendAsync(replayMessage);
+        Assert.True(replayResponse.Headers.Contains("Idempotent-Replay"));
+    }
+
+    [Fact]
+    public async Task MultipleCapture_EnforcesRemainderAndSupportsVoid()
+    {
+        using var createMessage = CreatePost(
+            "/api/v1/payments",
+            CreateRequest("order-multi-capture-1", amountMinor: 10_000),
+            "create-multi-capture-0001");
+        using var createResponse = await Client.SendAsync(createMessage);
+        var paymentId = (await ReadJsonAsync(createResponse)).RootElement.GetProperty("id").GetGuid();
+
+        using var firstCapture = CreatePost(
+            $"/api/v1/payments/{paymentId}/capture",
+            new { amountMinor = 4_000 },
+            "capture-multi-0001");
+        using var firstResponse = await Client.SendAsync(firstCapture);
+        Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+
+        using var secondCapture = CreatePost(
+            $"/api/v1/payments/{paymentId}/capture",
+            new { amountMinor = 3_500 },
+            "capture-multi-0002");
+        using var secondResponse = await Client.SendAsync(secondCapture);
+        var partial = await ReadJsonAsync(secondResponse);
+        Assert.Equal("PartiallyCaptured", partial.RootElement.GetProperty("status").GetString());
+        Assert.Equal(2_500, partial.RootElement.GetProperty("remainingAuthorizedAmountMinor").GetInt64());
+        Assert.Equal(2, partial.RootElement.GetProperty("captures").GetArrayLength());
+
+        using var excessiveCapture = CreatePost(
+            $"/api/v1/payments/{paymentId}/capture",
+            new { amountMinor = 2_501 },
+            "capture-multi-invalid-0001");
+        using var excessiveResponse = await Client.SendAsync(excessiveCapture);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, excessiveResponse.StatusCode);
+
+        using var voidMessage = CreatePost(
+            $"/api/v1/payments/{paymentId}/void",
+            body: null,
+            "void-multi-0001");
+        using var voidResponse = await Client.SendAsync(voidMessage);
+        var voided = await ReadJsonAsync(voidResponse);
+        Assert.Equal("PartiallyCapturedAndVoided", voided.RootElement.GetProperty("status").GetString());
+        Assert.Equal(2_500, voided.RootElement.GetProperty("voidedAmountMinor").GetInt64());
+    }
+
+    [Fact]
+    public async Task ReconciliationImport_ClassifiesStateAndAmountDrift()
+    {
+        using var createMessage = CreatePost(
+            "/api/v1/payments",
+            CreateRequest("order-reconciliation-import-1", amountMinor: 6_000),
+            "create-recon-import-0001");
+        using var createResponse = await Client.SendAsync(createMessage);
+        var created = await ReadJsonAsync(createResponse);
+        var providerReference = created.RootElement.GetProperty("providerReference").GetString();
+        var periodStart = DateTimeOffset.UtcNow.AddHours(-1);
+        var periodEnd = DateTimeOffset.UtcNow.AddHours(1);
+        var csv = $"provider_reference,authorized_amount_minor,captured_amount_minor,currency,state,occurred_at\n" +
+                  $"{providerReference},6000,1000,EUR,captured,{DateTimeOffset.UtcNow:O}\n";
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"/api/v1/reconciliation/imports/mock-bank?periodStart={Uri.EscapeDataString(periodStart.ToString("O"))}&periodEnd={Uri.EscapeDataString(periodEnd.ToString("O"))}")
+        {
+            Content = new StringContent(csv, Encoding.UTF8, "text/csv")
+        };
+        request.Headers.Add("X-Report-Name", "mock-bank-20260808.csv");
+
+        using var response = await Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var report = await ReadJsonAsync(response);
+        Assert.Equal("ReviewRequired", report.RootElement.GetProperty("status").GetString());
+        var types = report.RootElement.GetProperty("issues")
+            .EnumerateArray()
+            .Select(issue => issue.GetProperty("type").GetString())
+            .ToArray();
+        Assert.Contains("CapturedAmountMismatch", types);
+        Assert.Contains("StateMismatch", types);
+    }
+
     private HttpClient Client => _client ?? throw new InvalidOperationException("Test fixture is not initialized.");
 
     private static object CreateRequest(string merchantReference, long amountMinor = 12_990) => new
@@ -337,10 +453,9 @@ public sealed class PaymentApiTests : IAsyncLifetime
 
     private static HttpRequestMessage CreateWebhookPost(string payload, DateTimeOffset? signedAt = null)
     {
-        const string secret = "${SENTINELPAY_TEST_SIGNING_MATERIAL}";
         var timestamp = (signedAt ?? DateTimeOffset.UtcNow).ToUnixTimeSeconds();
         var signature = Convert.ToHexString(HMACSHA256.HashData(
-            Encoding.UTF8.GetBytes(secret),
+            Encoding.UTF8.GetBytes(SentinelPayApiFactory.WebhookSigningMaterial),
             Encoding.UTF8.GetBytes($"{timestamp}.{payload}")));
         var message = new HttpRequestMessage(HttpMethod.Post, "/api/v1/webhooks/mock-bank")
         {
@@ -370,7 +485,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             MerchantId = SecondMerchantId,
             Name = "integration-test-key",
             KeyHash = ApiKeyHasher.Hash(SecondMerchantApiKey),
-            Scopes = "payments:read payments:write ledger:read settlements:read settlements:write",
+            Scopes = "payments:read payments:write ledger:read settlements:read settlements:write reconciliation:write",
             CreatedAt = DateTimeOffset.UtcNow
         });
         await dbContext.SaveChangesAsync();

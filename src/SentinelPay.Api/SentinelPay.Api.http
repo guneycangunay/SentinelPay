@@ -1,5 +1,5 @@
 @host = http://localhost:8080
-@apiKey = ${SENTINELPAY_API_KEY}
+@apiKey = {{SENTINELPAY_API_KEY}}
 
 ### List providers
 GET {{host}}/api/v1/providers
@@ -20,3 +20,15 @@ X-Api-Key: {{apiKey}}
 }
 
 ### Use tok_declined or tok_insufficient_funds to exercise failure paths.
+
+### Capture part of the authorization
+POST {{host}}/api/v1/payments/00000000-0000-0000-0000-000000000000/capture
+Content-Type: application/json
+Idempotency-Key: demo-capture-0001
+X-Api-Key: {{apiKey}}
+
+{
+  "amountMinor": 5000
+}
+
+### Use tok_3ds_challenge with mock-bank or tok_http_3ds with acquirer-http for 3DS.
