@@ -2,7 +2,6 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.Configuration;
 
 namespace SentinelPay.IntegrationTests;
 
@@ -19,26 +18,21 @@ public sealed class SentinelPayApiFactory : WebApplicationFactory<Program>
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
-        builder.UseEnvironment("Testing");
-        builder.ConfigureAppConfiguration((_, configuration) =>
-        {
-            configuration.AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ConnectionStrings:Postgres"] = _postgresConnectionString,
-                ["Redis:Enabled"] = "false",
-                ["Outbox:DispatcherEnabled"] = "false",
-                ["Messaging:ConsumerEnabled"] = "false",
-                ["Reconciliation:Enabled"] = "false",
-                ["PaymentExpiry:Enabled"] = "false",
-                ["Database:InitializeOnStartup"] = "true",
-                ["DevelopmentMerchant:Seed"] = "true",
-                ["DevelopmentMerchant:Id"] = "2dc5f437-0a11-4c67-a810-b3e784470f73",
-                ["DevelopmentMerchant:Name"] = "Acme Commerce Tests",
-                ["DevelopmentMerchant:ApiKey"] = DevelopmentApiKey,
-                ["Webhooks:mock-bank:Secret"] = WebhookSigningMaterial,
-                ["Webhooks:sandbox-wallet:Secret"] = WebhookSigningMaterial
-            });
-        });
+        builder
+            .UseEnvironment("Testing")
+            .UseSetting("ConnectionStrings:Postgres", _postgresConnectionString)
+            .UseSetting("Redis:Enabled", "false")
+            .UseSetting("Outbox:DispatcherEnabled", "false")
+            .UseSetting("Messaging:ConsumerEnabled", "false")
+            .UseSetting("Reconciliation:Enabled", "false")
+            .UseSetting("PaymentExpiry:Enabled", "false")
+            .UseSetting("Database:InitializeOnStartup", "true")
+            .UseSetting("DevelopmentMerchant:Seed", "true")
+            .UseSetting("DevelopmentMerchant:Id", "2dc5f437-0a11-4c67-a810-b3e784470f73")
+            .UseSetting("DevelopmentMerchant:Name", "Acme Commerce Tests")
+            .UseSetting("DevelopmentMerchant:ApiKey", DevelopmentApiKey)
+            .UseSetting("Webhooks:mock-bank:Secret", WebhookSigningMaterial)
+            .UseSetting("Webhooks:sandbox-wallet:Secret", WebhookSigningMaterial);
     }
 
     private static string DeriveFixtureValue(string purpose) =>
