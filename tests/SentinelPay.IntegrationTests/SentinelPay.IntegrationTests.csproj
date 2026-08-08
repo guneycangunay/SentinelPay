@@ -4,6 +4,7 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
+    <Using Include="Xunit" />
     <ProjectReference Include="../../src/SentinelPay.Api/SentinelPay.Api.csproj" />
   </ItemGroup>
   <ItemGroup>
