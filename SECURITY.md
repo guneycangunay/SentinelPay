@@ -18,10 +18,13 @@ Do not include real payment data, access tokens, private keys, customer informat
 ## Implemented safeguards
 
 - Merchant API keys are stored as SHA-256 hashes and can expire or be revoked.
-- Endpoint policies require explicit payment, ledger, or settlement scopes.
+- Endpoint policies require explicit payment, ledger, settlement, or reconciliation scopes.
 - Merchant identity comes from authentication, never from request data.
 - Timestamped provider HMAC signatures are compared in constant time and deduplicated through an inbox.
 - Idempotency fingerprints reject same-key/different-payload mutations.
+- Provider HTTP retries preserve the native idempotency key and stop behind a shared failure circuit.
+- RabbitMQ consumers commit a unique inbox identity before acknowledging a CloudEvent.
+- Reconciliation uploads are merchant-scoped, strict UTF-8 CSV, and bounded by bytes, rows, fields, and time window.
 - Tokenized payment method identifiers are not persisted as plaintext.
 - PostgreSQL constraints and domain invariants protect tenant, operation, payment, and ledger integrity.
 - Containers run as a non-root user and Compose mounts the API root filesystem read-only.

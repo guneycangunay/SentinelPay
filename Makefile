@@ -1,6 +1,9 @@
-.PHONY: up down logs build test verify demo recovery chaos load race observability
+.PHONY: configure up down logs build test verify demo interview recovery chaos load race observability
 
-up:
+configure:
+	./scripts/configure-local-env.sh
+
+up: configure
 	docker compose up --build --detach
 
 down:
@@ -20,20 +23,23 @@ verify:
 	dotnet build SentinelPay.slnx --configuration Release --no-restore
 	dotnet test SentinelPay.slnx --configuration Release --no-build
 
-demo:
-	./scripts/demo.sh
+demo: configure
+	@set -a; . ./.env; set +a; ./scripts/demo.sh
 
-recovery:
-	./scripts/demo-recovery.sh
+interview: configure
+	@set -a; . ./.env; set +a; ./scripts/interview-demo.sh
 
-chaos:
-	./scripts/chaos-outbox.sh
+recovery: configure
+	@set -a; . ./.env; set +a; ./scripts/demo-recovery.sh
 
-load:
+chaos: configure
+	@set -a; . ./.env; set +a; ./scripts/chaos-outbox.sh
+
+load: configure
 	docker compose --profile loadtest run --rm loadtest
 
-race:
+race: configure
 	docker compose --profile loadtest run --rm -e RACE_ID=race-$$(date +%s) loadtest run /scripts/idempotency-race.js
 
-observability:
+observability: configure
 	docker compose -f compose.yml -f compose.observability.yml up --build --detach

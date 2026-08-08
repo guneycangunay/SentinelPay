@@ -41,8 +41,10 @@ curl --fail-with-body --silent --show-error --dump-header - --output /dev/null \
 echo "3/4 Capturing payment"
 curl --fail-with-body --silent --show-error -X POST \
   "${api_base}/api/v1/payments/${payment_id}/capture" \
+  -H 'Content-Type: application/json' \
   -H "X-Api-Key: ${api_key}" \
   -H "Idempotency-Key: demo-capture-${run_id}" \
+  -d '{"amountMinor":12990}' \
   | jq '{id, status, capturedAmountMinor}'
 
 echo "4/4 Refunding EUR 29.90"

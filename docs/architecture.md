@@ -10,7 +10,8 @@ The core design questions are:
 2. Can every captured or refunded amount be explained by balanced entries?
 3. Can committed state changes eventually produce events after a broker outage?
 4. Can one merchant ever observe another merchant's data?
-5. Can operators identify and repair incomplete work without guessing?
+5. Can an asynchronous cardholder challenge resume without duplicating authorization?
+6. Can operators identify and repair incomplete work without guessing?
 
 ## Components and ownership
 
@@ -25,7 +26,7 @@ flowchart TB
 
 | Layer | Owns | Must not own |
 |---|---|---|
-| Domain | Payment state machine, operations, refunds, journals, settlement invariants | HTTP, EF Core, broker APIs |
+| Domain | Payment-intent state machine, captures, operations, refunds, journals, settlement and reconciliation invariants | HTTP, EF Core, broker APIs |
 | Application | Use-case ordering, hashes, locks, transaction intent, ports | Provider SDK details, SQL |
 | Infrastructure | EF mappings, migration, distributed leases, RabbitMQ, sandbox adapters, workers | HTTP policy or domain rules |
 | API | Authentication, authorization, request binding, rate limiting, problem responses, telemetry wiring | Financial calculations |
@@ -37,11 +38,14 @@ erDiagram
     MERCHANT ||--o{ API_KEY : owns
     MERCHANT ||--o{ PAYMENT : owns
     PAYMENT ||--o{ PAYMENT_OPERATION : records
+    PAYMENT ||--o{ CAPTURE : contains
     PAYMENT ||--o{ REFUND : contains
     MERCHANT ||--o{ LEDGER_JOURNAL : owns
     LEDGER_JOURNAL ||--|{ LEDGER_LINE : balances
     MERCHANT ||--o{ SETTLEMENT_BATCH : owns
     SETTLEMENT_BATCH o|--o{ LEDGER_LINE : assigns
+    MERCHANT ||--o{ RECONCILIATION_REPORT : owns
+    RECONCILIATION_REPORT ||--o{ RECONCILIATION_ISSUE : classifies
 ```
 
 PostgreSQL foreign keys enforce ownership edges. Tenant-owned lookups include `MerchantId`; provider-reference lookup is the deliberate exception used only after a valid provider signature and relies on a globally unique `(Provider, ProviderReference)` index.
@@ -65,7 +69,18 @@ sequenceDiagram
 
 The first commit is intentional. It proves that SentinelPay knows the operation identity before it performs remote work. A matching retry loads the durable `Started` record and resumes the provider call with the same idempotency key.
 
-Capture and refund use the same shape. Refund eligibility is checked before the provider call, preventing a remote refund that the local aggregate would later reject.
+Authentication confirmation, capture, void, and refund use the same shape. Capture and refund eligibility are checked before the provider call, preventing a remote mutation that the local aggregate would later reject. The durable operation ID also becomes the local capture/refund ID, so a resumed attempt retains one identity across the provider and database failure window.
+
+## HTTP provider boundary
+
+`ProviderHttpGateway` calls a separate acquirer simulator through `HttpClient`. Mutation requests contain the same durable provider idempotency key on every attempt. The adapter distinguishes:
+
+- completed business outcomes (`declined`, invalid amount): map and return without retry;
+- transient transport outcomes (`408`, `429`, `5xx`, connection loss): bounded retry with jitter and `Retry-After` support;
+- repeated exhausted failures: open a shared circuit, then permit one half-open probe after the break interval;
+- exhausted ambiguity: surface a retryable provider-unavailable result while leaving the operation `Started`.
+
+The simulator is a contract fixture, not a fake implementation hidden inside the adapter. It owns provider-side idempotency responses and state, allowing local tests and demos to cross a real HTTP serialization and timeout boundary.
 
 ### Failure-window analysis
 
@@ -96,11 +111,22 @@ Redis leases reduce simultaneous remote calls. They are not a correctness bounda
 ```mermaid
 stateDiagram-v2
     [*] --> Pending
+    Pending --> RequiresAction: 3DS challenge
     Pending --> Authorized: authorize accepted
     Pending --> Failed: authorize declined
-    Authorized --> Captured: capture or repair
+    RequiresAction --> Authorized: challenge passed
+    RequiresAction --> Failed: challenge failed
+    RequiresAction --> Expired: action timeout
+    Authorized --> PartiallyCaptured: partial capture
+    PartiallyCaptured --> PartiallyCaptured: another partial capture
+    Authorized --> Captured: full capture
+    PartiallyCaptured --> Captured: final capture
+    Authorized --> Voided: void remainder
+    PartiallyCaptured --> PartiallyCapturedAndVoided: void remainder
+    Authorized --> Expired: authorization timeout
     Authorized --> Failed: provider failure
     Captured --> PartiallyRefunded: partial refund
+    PartiallyCapturedAndVoided --> PartiallyRefunded: partial refund
     Captured --> Refunded: full refund
     PartiallyRefunded --> PartiallyRefunded: partial refund
     PartiallyRefunded --> Refunded: remaining refund
@@ -117,7 +143,7 @@ The ledger is append-only at the domain level. `LedgerJournal.Create` materializ
 - at least two positive lines exist;
 - sum(debits) equals sum(credits).
 
-Journal external references are unique, making journal production idempotent. Capture increases merchant payable; refund decreases it; settlement transfers the selected payable balance to settlement clearing.
+Journal external references are unique, making journal production idempotent. Each capture posts its own amount under `capture:{captureId}`; cumulative payment totals are never reposted. Refund decreases merchant payable; settlement transfers the selected payable balance to settlement clearing.
 
 Settlement runs under a `(merchant, currency)` lease. It selects unassigned `MerchantPayable` lines through `PeriodEnd`, computes credit minus debit, creates one batch, assigns the source lines, creates the balancing settlement journal, and adds an outbox event in the same EF Core unit of work.
 
@@ -132,7 +158,7 @@ State changes and event intent commit together in PostgreSQL. Dispatch has two p
 
 Failed publications use bounded exponential backoff. After `Outbox:MaxAttempts`, the row receives `DeadLetteredAt` and stops competing with healthy traffic. A dedicated metric and error log expose the condition.
 
-The audit queue is durable and bound to the topic exchange with `#`, providing a local way to inspect all event types. Production consumers should use bounded routing keys and their own dead-letter policies.
+The audit queue is durable and bound to the topic exchange with `#`. Its consumer uses manual ACK and stores a unique `(consumer,eventId)` row in PostgreSQL before acknowledgement. A stop after commit but before ACK therefore becomes a harmless redelivery. Invalid CloudEvent envelopes are rejected to a dedicated DLQ; transient database failures are requeued.
 
 ## Webhook ingress
 
@@ -150,18 +176,21 @@ Timestamp validation limits captured-signature replay; inbox uniqueness handles 
 
 ## Reconciliation
 
-The worker discovers stale authorized payment IDs without tracking, then handles each ID in its own dependency-injection scope and database unit of work. One provider timeout or malformed result does not discard corrections already applied to other payments.
+Online reconciliation discovers stale authorized or partially captured payments without tracking, then handles each ID in its own dependency-injection scope and database unit of work. One provider timeout or malformed result does not discard corrections already applied to other payments.
 
 External states are interpreted as:
 
 | Provider state | Local action |
 |---|---|
 | Authorized | No change |
-| Captured | Capture locally, write ledger, record reconcile operation, emit event |
+| Partially captured or captured | Post only the positive capture delta, write its journal, record operation, emit event |
+| Voided | Close the local authorization remainder and emit event |
 | Failed | Mark failed, record reconcile operation, emit event |
-| Unknown | No change; inspect operational signals |
+| Refunded, closed partial capture, or unknown | No automatic repair; inspect report/status evidence |
 
 Optimistic concurrency handles competing API/webhook/reconciliation changes. A conflict leaves the winning state intact and is retried in a later cycle when still relevant.
+
+CSV reconciliation is deliberately separate. A strict, bounded provider report is identified by SHA-256 and compared within a merchant/provider/time window. Missing references, authorized or captured amount drift, currency drift, and state drift become typed issues. This broader evidence workflow never silently edits financial state.
 
 ## Security boundaries
 
@@ -182,8 +211,8 @@ The provisioned dashboard focuses on outcomes, provider latency, event delivery,
 
 ## Non-goals
 
-- No real card data or gateway credentials.
-- No claim of exactly-once remote mutation or event consumption.
+- No real card data, gateway credentials, or certified financial-institution integration.
+- No claim of exactly-once transport; the included consumer demonstrates a transactional idempotent local side effect.
 - No payout rail, fee engine, tax engine, FX conversion, or chargeback workflow.
 - No merchant self-service control plane for issuing and rotating API keys.
 - No PCI DSS certification.

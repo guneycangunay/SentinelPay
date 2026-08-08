@@ -21,7 +21,7 @@ flowchart TB
 |---|---|
 | Merchant → API | Hashed API key lookup, scopes, merchant partitioning, rate limits, TLS assumed at ingress |
 | Provider → webhook | Timestamped HMAC, constant-time comparison, replay tolerance, inbox deduplication |
-| API → provider | Tokenized identifiers, deterministic operation identity, adapter boundary |
+| API → provider | Tokenized identifiers, durable operation identity, bounded HTTP policy, provider idempotency |
 | Workload → PostgreSQL | Parameterized EF Core queries, foreign keys, unique constraints, optimistic concurrency |
 | Workload → Redis | Namespaced keys, random lease token, compare-and-delete release |
 | Workload → RabbitMQ | Authenticated URI, durable exchange/queue, persistent messages, confirms, mandatory publish |
@@ -38,11 +38,13 @@ flowchart TB
 | Information disclosure | Cross-merchant object lookup | Merchant derived from credential; tenant predicate on reads/mutations | Add automated query-policy review as the model grows |
 | Information disclosure | Error leaks provider/internal data | Generic problem details; structured server logs | Apply log redaction and retention controls |
 | Denial of service | Request flood | Merchant-partitioned fixed-window limiter | Add edge WAF, adaptive limits, quotas, body-size/time limits |
-| Denial of service | Poison event blocks delivery | Per-row retries, claim expiry, dead-letter threshold | Add operator replay workflow and broker consumer DLQs |
+| Denial of service | Poison event blocks delivery | Manual ACK consumer, envelope validation, dedicated consumer DLQ | Add authorized operator replay workflow |
 | Elevation of privilege | Broad API-key scope | Explicit route policies and scope claims | Add least-privilege issuance and authorization audit tests |
 | Replay | Captured webhook resent | Five-minute signature window and inbox uniqueness | Provider clock skew and secret leakage still require monitoring |
 | Race | Concurrent capture/refund | Redis lease, operation uniqueness, row version, state machine | Distributed locks are advisory; provider-native idempotency remains required |
 | Ambiguous outcome | Timeout after provider accepted | Durable Started operation and same-key resume | Provider must support lookup/idempotency; otherwise manual reconciliation |
+| Open redirect | Provider supplies malicious 3DS action | Require an absolute HTTPS URL and bounded value | Production adapter should enforce provider-owned host allowlists |
+| Spreadsheet/report abuse | Oversized or malformed reconciliation CSV | 2 MiB/10k-row caps, strict header/types, bounded fields, tenant scope | Add malware scanning and object-store quarantine for external files |
 
 ## Abuse cases
 
@@ -62,6 +64,10 @@ Changing the event body invalidates the HMAC because the exact raw bytes are sig
 
 Mandatory publish plus publisher confirms surfaces unroutable or rejected messages. The outbox keeps event intent and eventually dead-letters repeated failures rather than silently discarding them.
 
+### Consumer redelivery after commit
+
+The consumer commits a unique `(consumer,eventId)` inbox/audit row before ACK. If the ACK is lost, redelivery finds the committed identity and produces no second database effect. This does not make arbitrary downstream network effects exactly once; each consumer must own an idempotent boundary.
+
 ## Security assumptions
 
 - TLS is terminated by a trusted ingress and internal dependency connections are protected by the deployment network.
@@ -72,4 +78,4 @@ Mandatory publish plus publisher confirms surfaces unroutable or rejected messag
 
 ## Explicit gaps
 
-This reference does not include a key-management control plane, secrets manager integration, fine-grained operator roles, immutable audit sink, data-retention jobs, field-level encryption, WAF, mTLS, real provider SDK, payout rail, or PCI DSS controls. These are deployment/product responsibilities, not implied by the sample.
+This reference does not include a key-management control plane, secrets manager integration, fine-grained operator roles, immutable external audit sink, inbox/outbox retention jobs, field-level encryption, WAF, mTLS, certified provider integration, payout rail, chargebacks, or PCI DSS controls. These are deployment/product responsibilities, not implied by the sample.

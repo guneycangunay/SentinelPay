@@ -2,6 +2,27 @@
 
 All notable changes are documented here. The project follows semantic versioning for repository milestones.
 
+## [2.1.0] - 2026-08-08
+
+### Added
+
+- Payment-intent states for 3DS/SCA challenge, confirmation, action expiry, and authorization expiry.
+- Multiple partial captures, explicit authorization remainder, and full/partial void behavior.
+- Capture entities and per-capture double-entry journals, avoiding cumulative ledger duplication.
+- A real HTTP provider adapter with timeout budget, bounded retry, `Retry-After`, business-error mapping, and stable provider idempotency keys.
+- A standalone provider simulator covering authorization, 3DS, capture, void, refund, rate limiting, timeout, and status lookup contracts.
+- RabbitMQ audit consumer with manual acknowledgements, PostgreSQL inbox uniqueness, poison-message dead lettering, and commit-before-ACK ordering.
+- CSV reconciliation imports that classify missing, amount, currency, and state mismatches without silently changing money state.
+- Authorization-expiry worker, HTTP contract tests, multi-capture and 3DS lifecycle tests, and an interview demo script.
+
+### Changed
+
+- Capture requests now carry an explicit integer minor-unit amount.
+- Provider operations expose provider-side capture and void references.
+- Automatic reconciliation can repair incremental provider captures without posting cumulative ledger totals twice.
+- Local database, broker, API, webhook, and Grafana credentials are generated into a git-ignored `.env`; no runnable credential is committed.
+- Repository version advanced to `2.1.0`.
+
 ## [2.0.0] - 2026-08-08
 
 ### Added

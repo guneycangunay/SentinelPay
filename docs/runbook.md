@@ -14,6 +14,8 @@ This runbook describes the operational intent of the reference implementation. A
 | Oldest pending outbox age | Delivery objective is being missed | >5 minutes |
 | Stale authorized payments | Local/provider state may be drifting | Growth across three reconciliation cycles |
 | Reconciliation correction count | Detects provider callback loss | Significant deviation from baseline |
+| Audit consumer queue depth | Consumer outage or poison traffic | Sustained growth for 5 minutes |
+| 3DS action expiry count | Merchant return-path or issuer challenge degradation | Deviation from provider baseline |
 
 Metric names and the starter dashboard live in `observability/`. Production alerting should add a database-derived oldest-message gauge and business-volume baselines.
 
@@ -40,7 +42,7 @@ FROM sentinelpay.outbox_messages;
 ```
 
 4. Restore the broker or routing topology. Workers reclaim messages after `LockedUntil` and retry after `NextAttemptAt`.
-5. Confirm the pending count drains and the RabbitMQ audit queue receives CloudEvents.
+5. Confirm the pending count drains, the audit consumer records inbox rows, and queue depth returns to baseline.
 6. For dead-lettered rows, identify and correct the root cause before an audited replay. Do not bulk-reset rows while the cause is unknown.
 
 The local `make chaos` drill exercises this path.
@@ -80,10 +82,28 @@ The local `make recovery` drill demonstrates safe resume behavior.
 1. Group corrections by provider and event type in logs/metrics.
 2. Inspect webhook signature failures, provider delivery dashboards, and inbox receipt gaps.
 3. Check whether provider callbacks arrived after the configured stale threshold.
-4. Confirm corrected captures produced exactly one `capture:{paymentId}` ledger journal.
+4. Confirm corrected captures produced exactly one `capture:{captureId}` ledger journal for each positive delta.
 5. If provider `Unknown` results grow, stop automatic assumptions and contact the provider; Unknown is intentionally a no-op.
 
 Reconciliation processes each payment independently, so one failure should not roll back other corrections in the batch.
+
+## Incident: audit consumer queue grows
+
+1. Check PostgreSQL readiness and consumer connection logs.
+2. Compare the main audit queue and `sentinelpay.audit.dlq` depths.
+3. Inspect `sentinelpay.consumed_events` for recent event IDs and types.
+4. For malformed events, correct the producer contract before replaying the DLQ.
+5. For database failures, restore PostgreSQL; unacknowledged deliveries are requeued automatically.
+6. Never purge or replay financial events without recording the event IDs and intended consumer side effects.
+
+## Incident: reconciliation report requires review
+
+1. Verify merchant, provider, half-open period, timezone, and report checksum.
+2. Group `reconciliation_issues` by type.
+3. Treat currency and amount mismatches as financial review; do not edit ledger rows.
+4. For `MissingLocally`, search the provider by merchant reference and idempotency key before creating any record.
+5. For `MissingAtProvider`, confirm the report is complete and then use authoritative provider status lookup.
+6. Record the resolution externally or add a controlled resolution workflow; the import intentionally preserves evidence only.
 
 ## Incident: ledger imbalance suspected
 
