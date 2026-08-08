@@ -1,89 +1,191 @@
 # SentinelPay architecture
 
-## Design objective
+## Objective
 
-SentinelPay protects money-moving state transitions when clients, networks, application instances, and payment providers can all retry independently. Its goal is not broad gateway coverage; its goal is to make reliability decisions visible and testable.
+SentinelPay protects money-moving state when clients, application nodes, databases, brokers, and providers can fail or retry independently. The architecture favors explicit invariants and recoverable intermediate states over claims of exactly-once execution.
 
-## Authorization sequence
+The core design questions are:
+
+1. Can a request be retried without creating another remote mutation?
+2. Can every captured or refunded amount be explained by balanced entries?
+3. Can committed state changes eventually produce events after a broker outage?
+4. Can one merchant ever observe another merchant's data?
+5. Can operators identify and repair incomplete work without guessing?
+
+## Components and ownership
+
+```mermaid
+flowchart TB
+    Edge["HTTP identity and contracts"] --> App["Application use cases"]
+    App --> Domain["Aggregates and invariants"]
+    App --> Ports["Storage, lock, gateway, event ports"]
+    Ports --> Infra["PostgreSQL, Redis, RabbitMQ, adapters"]
+    Infra --> Workers["Outbox and reconciliation"]
+```
+
+| Layer | Owns | Must not own |
+|---|---|---|
+| Domain | Payment state machine, operations, refunds, journals, settlement invariants | HTTP, EF Core, broker APIs |
+| Application | Use-case ordering, hashes, locks, transaction intent, ports | Provider SDK details, SQL |
+| Infrastructure | EF mappings, migration, distributed leases, RabbitMQ, sandbox adapters, workers | HTTP policy or domain rules |
+| API | Authentication, authorization, request binding, rate limiting, problem responses, telemetry wiring | Financial calculations |
+
+## Data model
+
+```mermaid
+erDiagram
+    MERCHANT ||--o{ API_KEY : owns
+    MERCHANT ||--o{ PAYMENT : owns
+    PAYMENT ||--o{ PAYMENT_OPERATION : records
+    PAYMENT ||--o{ REFUND : contains
+    MERCHANT ||--o{ LEDGER_JOURNAL : owns
+    LEDGER_JOURNAL ||--|{ LEDGER_LINE : balances
+    MERCHANT ||--o{ SETTLEMENT_BATCH : owns
+    SETTLEMENT_BATCH o|--o{ LEDGER_LINE : assigns
+```
+
+PostgreSQL foreign keys enforce ownership edges. Tenant-owned lookups include `MerchantId`; provider-reference lookup is the deliberate exception used only after a valid provider signature and relies on a globally unique `(Provider, ProviderReference)` index.
+
+## Crash-safe authorization
 
 ```mermaid
 sequenceDiagram
-    participant C as Merchant
+    participant M as Merchant
     participant A as API
-    participant R as Redis
-    participant G as Gateway
-    participant P as PostgreSQL
+    participant D as PostgreSQL
+    participant G as Provider
 
-    C->>A: POST payment + Idempotency-Key
-    A->>R: Acquire create lock
-    A->>P: Find existing key
-    alt Existing matching request
-        P-->>A: Original payment
-        A-->>C: 200 + Idempotent-Replay
-    else New request
-        A->>G: Authorize with same key
-        G-->>A: Authorized or declined
-        A->>P: Payment + outbox event (one commit)
-        A-->>C: 201 payment
-    end
+    M->>A: POST payment + key
+    A->>D: Commit Payment + Started operation
+    A->>G: Authorize with same key
+    G-->>A: Accepted or declined
+    A->>D: Commit final state + operation + outbox
+    A-->>M: Resource response
 ```
 
-The provider call intentionally precedes the database commit. A crash in that gap is handled by forwarding the merchant idempotency key to the provider adapter. Real adapters must map this to the provider's native idempotency mechanism.
+The first commit is intentional. It proves that SentinelPay knows the operation identity before it performs remote work. A matching retry loads the durable `Started` record and resumes the provider call with the same idempotency key.
 
-## Transactional outbox
+Capture and refund use the same shape. Refund eligibility is checked before the provider call, preventing a remote refund that the local aggregate would later reject.
 
-Payment state and its integration event are added to one EF Core unit of work. The dispatcher reads unpublished rows in order, publishes a CloudEvents-compatible envelope, and then stamps `ProcessedAt`. Failures increment `AttemptCount` and schedule a bounded exponential retry.
+### Failure-window analysis
 
-This produces at-least-once publication. Consumers must deduplicate on the event ID.
+| Failure window | Durable state | Recovery |
+|---|---|---|
+| Before the initial commit | Nothing | Retry starts normally; no provider call occurred. |
+| After initial commit, before provider call | `Started` operation | Retry resumes that operation. |
+| After provider acceptance, before final commit | `Started` operation; provider may have changed | Retry sends the same provider key and receives the deterministic/native replay result. |
+| After final commit, before HTTP response | Final payment, completed operation, outbox row | Retry returns the stored resource. |
+| After broker publish, before `ProcessedAt` | Published event and pending row | Dispatcher may publish again; consumer deduplicates by CloudEvent ID. |
 
-## Webhook inbox
+This design depends on real provider adapters honoring their native idempotency contract. A provider without such a capability needs a provider-specific lookup/reconciliation strategy and cannot offer the same guarantee.
 
-Webhook authentication occurs before parsing or database access. Once authenticated:
+## Idempotency semantics
 
-1. Resolve the provider adapter.
-2. Acquire a lock on `(provider, eventId)`.
-3. Check the webhook inbox.
-4. Resolve the payment by provider reference.
-5. Apply a forward-only state transition.
-6. Store the inbox receipt and outbox event in the same commit.
+Operation identity is `(MerchantId, OperationType, IdempotencyKey)`. The request fingerprint is a SHA-256 digest over a version-stable, delimiter-separated canonical field list.
 
-The unique `(provider, eventId)` index is the final duplicate barrier.
+- Same key + same fingerprint + completed operation: return stored result.
+- Same key + same fingerprint + started operation: resume with the same provider key.
+- Same key + different fingerprint: return `409`.
+- New key against a state that cannot perform the operation: reject through the domain state machine.
+- Provider decline: complete the operation as `Failed`; later matching retries replay that failure rather than calling the provider again.
 
-## Concurrency model
+Redis leases reduce simultaneous remote calls. They are not a correctness boundary: a lease can expire or be lost. Database uniqueness, optimistic concurrency, provider idempotency, and domain transitions remain the final barriers.
 
-SentinelPay uses layered controls because no single mechanism is sufficient:
-
-- Redis lock: reduces concurrent external calls across application nodes.
-- Provider idempotency: protects the remote side of a retried request.
-- PostgreSQL uniqueness: rejects duplicate create/refund operation keys.
-- PostgreSQL row version: detects stale concurrent aggregate writes.
-- State-machine invariants: reject invalid forward or backward transitions.
-
-## State machine
+## Payment state machine
 
 ```mermaid
 stateDiagram-v2
     [*] --> Pending
-    Pending --> Authorized: provider accepts
-    Pending --> Failed: provider declines
-    Authorized --> Captured: capture or webhook
+    Pending --> Authorized: authorize accepted
+    Pending --> Failed: authorize declined
+    Authorized --> Captured: capture or repair
     Authorized --> Failed: provider failure
     Captured --> PartiallyRefunded: partial refund
     Captured --> Refunded: full refund
-    PartiallyRefunded --> PartiallyRefunded: another partial refund
-    PartiallyRefunded --> Refunded: remaining amount refunded
+    PartiallyRefunded --> PartiallyRefunded: partial refund
+    PartiallyRefunded --> Refunded: remaining refund
 ```
+
+Backward transitions are not exposed. Reconciliation is forward-only.
+
+## Ledger and settlement
+
+The ledger is append-only at the domain level. `LedgerJournal.Create` materializes all lines only after verifying:
+
+- merchant and external reference exist;
+- currency is normalized;
+- at least two positive lines exist;
+- sum(debits) equals sum(credits).
+
+Journal external references are unique, making journal production idempotent. Capture increases merchant payable; refund decreases it; settlement transfers the selected payable balance to settlement clearing.
+
+Settlement runs under a `(merchant, currency)` lease. It selects unassigned `MerchantPayable` lines through `PeriodEnd`, computes credit minus debit, creates one batch, assigns the source lines, creates the balancing settlement journal, and adds an outbox event in the same EF Core unit of work.
+
+The batch remains `Pending`; a real payout adapter and bank-confirmation workflow are deliberately outside this sample.
+
+## Transactional outbox
+
+State changes and event intent commit together in PostgreSQL. Dispatch has two phases:
+
+1. A short transaction claims eligible rows using `FOR UPDATE SKIP LOCKED`, recording worker and claim expiry.
+2. Outside that transaction, the worker publishes a persistent CloudEvent through a long-lived RabbitMQ channel with publisher confirmations, then marks the row processed.
+
+Failed publications use bounded exponential backoff. After `Outbox:MaxAttempts`, the row receives `DeadLetteredAt` and stops competing with healthy traffic. A dedicated metric and error log expose the condition.
+
+The audit queue is durable and bound to the topic exchange with `#`, providing a local way to inspect all event types. Production consumers should use bounded routing keys and their own dead-letter policies.
+
+## Webhook ingress
+
+Authentication occurs before parsing or data access:
+
+1. Parse `t=<unix-seconds>,v1=<digest>`.
+2. Reject a timestamp outside the configured tolerance.
+3. Compute HMAC-SHA256 over `{timestamp}.{rawBody}`.
+4. Compare digests in constant time.
+5. Resolve and validate the event.
+6. Lock and check `(provider, eventId)` inbox identity.
+7. Apply a forward transition, ledger journal, inbox receipt, and outbox event in one commit.
+
+Timestamp validation limits captured-signature replay; inbox uniqueness handles legitimate provider redelivery.
+
+## Reconciliation
+
+The worker discovers stale authorized payment IDs without tracking, then handles each ID in its own dependency-injection scope and database unit of work. One provider timeout or malformed result does not discard corrections already applied to other payments.
+
+External states are interpreted as:
+
+| Provider state | Local action |
+|---|---|
+| Authorized | No change |
+| Captured | Capture locally, write ledger, record reconcile operation, emit event |
+| Failed | Mark failed, record reconcile operation, emit event |
+| Unknown | No change; inspect operational signals |
+
+Optimistic concurrency handles competing API/webhook/reconciliation changes. A conflict leaves the winning state intact and is retried in a later cycle when still relevant.
+
+## Security boundaries
+
+- API keys are stored only as SHA-256 hashes and resolve to one active merchant.
+- Authorization policies require explicit scopes.
+- Rate limiting partitions by authenticated merchant, falling back to source IP only before identity exists.
+- Payment method tokens affect request fingerprints but are never stored as plaintext.
+- Application containers run as the platform `app` user and support a read-only root filesystem.
+- Development seeds and secrets are enabled only in the Development configuration or Compose environment.
+
+See [the threat model](threat-model.md) for assets, trust boundaries, threats, and residual risks.
 
 ## Observability
 
-The API exports ASP.NET Core, HTTP client, and runtime metrics at `/metrics`. Traces can be sent to any OTLP-compatible collector by setting `OTEL_EXPORTER_OTLP_ENDPOINT`. Logs are JSON and include trace identifiers from the request scope.
+The service emits JSON logs, ASP.NET Core/runtime metrics, payment and provider metrics, outbox counters, and distributed traces. High-cardinality identifiers are trace tags, not metric dimensions. Provider and currency tags are bounded by configured adapters and ISO codes.
 
-Useful production alerts would include:
+The provisioned dashboard focuses on outcomes, provider latency, event delivery, and API latency. The [runbook](runbook.md) includes diagnostic queries and incident procedures.
 
-- outbox oldest-unprocessed age;
-- webhook signature failure rate;
-- idempotency conflict rate;
-- provider latency/error rate by operation;
-- stale authorization count;
-- reconciliation corrections by provider;
-- distributed lock acquisition timeouts.
+## Non-goals
+
+- No real card data or gateway credentials.
+- No claim of exactly-once remote mutation or event consumption.
+- No payout rail, fee engine, tax engine, FX conversion, or chargeback workflow.
+- No merchant self-service control plane for issuing and rotating API keys.
+- No PCI DSS certification.
+
+These boundaries keep the repository centered on reliability and financial integrity rather than superficial breadth.

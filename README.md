@@ -4,99 +4,131 @@
 
 <p align="center">
   <img alt=".NET 10" src="https://img.shields.io/badge/.NET-10.0-512BD4?style=flat-square" />
-  <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-18-4169E1?style=flat-square&logo=postgresql&logoColor=white" />
-  <img alt="Redis" src="https://img.shields.io/badge/Redis-8-DC382D?style=flat-square&logo=redis&logoColor=white" />
-  <img alt="Docker" src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white" />
+  <img alt="PostgreSQL 18" src="https://img.shields.io/badge/PostgreSQL-18-4169E1?style=flat-square&logo=postgresql&logoColor=white" />
+  <img alt="RabbitMQ 4" src="https://img.shields.io/badge/RabbitMQ-4-FF6600?style=flat-square&logo=rabbitmq&logoColor=white" />
+  <img alt="OpenTelemetry" src="https://img.shields.io/badge/OpenTelemetry-instrumented-7B61FF?style=flat-square" />
   <img alt="License" src="https://img.shields.io/badge/license-MIT-2dd4bf?style=flat-square" />
 </p>
 
-SentinelPay is a production-minded payment orchestration reference built around the failures that make payment systems difficult: duplicate client requests, concurrent mutations, provider retries, lost events, delayed webhooks, and state drift.
+SentinelPay is a production-minded, multi-tenant payment reliability platform. It focuses on the hard parts of money movement: ambiguous provider outcomes, concurrent retries, ledger correctness, durable event delivery, webhook replay attacks, settlement boundaries, and state drift.
 
-It deliberately uses deterministic sandbox gateways, so the complete authorize → capture → refund lifecycle runs locally without payment credentials or real money.
+The repository uses deterministic sandbox gateways, so the full authorize → capture → refund → settlement lifecycle runs locally without real payment credentials or cardholder data.
 
-## What this demonstrates
+## Engineering depth
 
-- Provider-independent authorize, capture, partial refund, and full refund flows
-- End-to-end idempotency with payload fingerprinting and replay responses
-- Redis-backed mutation locks plus PostgreSQL optimistic concurrency
-- Transactional outbox with CloudEvents-compatible envelopes and exponential backoff
-- HMAC-authenticated, deduplicated webhook inbox processing
-- Background reconciliation for stale provider state
-- RFC 9457-style problem responses, rate limiting, health checks, metrics, and traces
-- Domain tests and PostgreSQL integration tests powered by Testcontainers
-- One-command local environment with Docker Compose
+| Capability | Implementation |
+|---|---|
+| Crash-safe payment operations | A durable `Started/Succeeded/Failed` operation record is committed before each provider mutation. A retry resumes the same operation and forwards the same key. |
+| Tenant isolation | Hashed API keys resolve a merchant identity and scopes; every merchant-owned query is tenant-filtered. |
+| Financial correctness | Immutable, balanced double-entry journals track provider clearing, merchant payable, refunds, and settlement clearing. |
+| Durable event delivery | Payment state and outbox intent share one PostgreSQL commit; workers claim with `FOR UPDATE SKIP LOCKED` and publish persistent CloudEvents to RabbitMQ with confirms. |
+| Failure containment | Bounded exponential retry, claim expiry, dead-letter threshold, per-payment reconciliation isolation, and RFC 9457-style errors. |
+| Provider callback security | Timestamped HMAC-SHA256 signatures, constant-time comparison, five-minute replay window, and a deduplicating webhook inbox. |
+| Operability | Prometheus metrics, OpenTelemetry traces, JSON logs, Grafana dashboard, health probes, load profiles, and executable recovery/chaos drills. |
+| Delivery discipline | Reviewed EF migration, Testcontainers integration suite, CodeQL, dependency updates, coverage artifact, and production container build in CI. |
 
-## Architecture
+## System shape
 
 ```mermaid
 flowchart TB
-    Client["Merchant client"] --> API["SentinelPay API"]
-    Provider["Payment provider"] --> Webhook["Signed webhook endpoint"]
-    API --> Lock["Redis mutation lock"]
-    Webhook --> Lock
-    API --> App["Payment application service"]
-    Webhook --> App
-    App --> Gateway["Provider adapter"]
-    App --> DB[("PostgreSQL")]
-    DB --> Outbox["Outbox dispatcher"]
-    DB --> Reconcile["Reconciliation worker"]
-    Outbox --> Events["CloudEvents publisher"]
-    Reconcile --> Gateway
+    Client["Merchant client"] --> API["Authenticated API"]
+    Provider["Provider webhook"] --> API
+    API --> Core["Payment and finance use cases"]
+    Core --> Lock["Redis leases"]
+    Core --> Gateway["Provider adapters"]
+    Core --> DB[("PostgreSQL")]
+    DB --> Worker["Outbox and reconciliation workers"]
+    Worker --> Gateway
+    Worker --> Broker["RabbitMQ"]
 ```
 
-The project follows a pragmatic layered design:
+The dependency direction remains strict: Domain has no infrastructure dependency; Application owns use cases and ports; Infrastructure implements persistence, locking, messaging, and gateways; API owns transport and identity.
 
-```text
-SentinelPay.Domain          Payment aggregate and business invariants
-SentinelPay.Application     Use cases and provider/storage abstractions
-SentinelPay.Infrastructure  PostgreSQL, Redis, gateways, outbox, reconciliation
-SentinelPay.Api             HTTP contract, error mapping, rate limits, telemetry
-```
+See [the architecture deep dive](docs/architecture.md) for transaction boundaries, failure windows, data ownership, and sequence diagrams.
 
-More detail is available in [Architecture](docs/architecture.md) and the [architecture decision records](docs/adr).
+## Reliability contract
 
-## Reliability invariants
-
-| Risk | SentinelPay response |
+| Failure | Observable behavior |
 |---|---|
-| Client retries a timed-out request | The same key and payload returns the original payment with `Idempotent-Replay: true`. |
-| A key is reused for different data | The API returns `409 idempotency-conflict`; it never guesses intent. |
-| Two nodes mutate one payment | Redis serializes the operation; PostgreSQL's row version remains the final concurrency barrier. |
-| Database commits but event publication fails | The event remains in the outbox and is retried with bounded exponential backoff. |
-| Provider delivers the same webhook repeatedly | The `(provider, eventId)` inbox constraint makes processing idempotent. |
-| Local state drifts from the provider | A reconciliation worker inspects stale authorizations and applies forward-only repairs. |
-| API crashes after a provider accepts a call | The same idempotency key is forwarded to the adapter, enabling provider-side replay safety. |
+| Client retries an unchanged request | The original resource is returned with `Idempotent-Replay: true`. |
+| Client reuses a key for different data | `409 idempotency-conflict`; no provider call is attempted. |
+| API stops after recording intent but before the provider call | The next request resumes the `Started` operation. |
+| Provider succeeds but the final database commit is lost | The retry uses the same provider key and converges on the same provider reference. |
+| Event broker is unavailable | Business state commits; the outbox retries independently and dead-letters after the configured limit. |
+| Two workers claim pending events | PostgreSQL row locks and `SKIP LOCKED` partition work without holding a transaction over network I/O. |
+| Provider sends a duplicate webhook | The `(provider, eventId)` inbox constraint makes the replay harmless. |
+| Provider state differs from local state | Reconciliation applies only forward repairs and commits each payment independently. |
 
-## Run it
+SentinelPay promises at-least-once event delivery, not exactly-once processing. Consumers must deduplicate on the CloudEvent `id`.
+
+## Run locally
 
 Prerequisite: Docker with Compose v2.
 
 ```bash
-cd SentinelPay
-docker compose up --build
+make up
+curl http://localhost:8080/health/ready
 ```
 
-Then open:
+Local endpoints:
 
-- Swagger UI: <http://localhost:8080/swagger>
-- Readiness: <http://localhost:8080/health/ready>
-- Prometheus metrics: <http://localhost:8080/metrics>
+- Swagger: <http://localhost:8080/swagger>
+- API: <http://localhost:8080>
+- RabbitMQ management: <http://localhost:15672> (`sentinelpay` / `${SENTINELPAY_LOCAL_PASSWORD}`)
+- Metrics: <http://localhost:8080/metrics>
 
-Run the complete authorize/replay/capture/refund scenario (requires `curl` and `jq`):
+The development merchant is seeded by the migration initializer. Its sandbox API key is:
+
+```text
+${SENTINELPAY_API_KEY}
+```
+
+All credentials in this repository are local-only fixtures. Non-development environments must inject secrets and keep `DevelopmentMerchant:Seed=false`.
+
+## Demonstrate the hard paths
 
 ```bash
-./scripts/demo.sh
+make demo       # authorize, deterministic replay, capture, partial refund
+make recovery   # fail once after operation persistence, then resume safely
+make chaos      # stop RabbitMQ, commit payment, restore broker, verify drain
+make race       # 25 concurrent requests sharing one idempotency key
 ```
 
-PostgreSQL and Redis are included. The API creates the demo schema on first startup.
+The standard lifecycle script prints payment state and its operation history. The recovery drill intentionally returns `503` once, then succeeds with the exact same request and idempotency key.
 
-## Try the payment lifecycle
+## Observability stack
 
-Authorize:
+```bash
+make observability
+```
+
+Grafana is available at <http://localhost:3000> (`admin` / `${SENTINELPAY_LOCAL_PASSWORD}`) with a provisioned SentinelPay Reliability Overview dashboard. Prometheus is available at <http://localhost:9090>.
+
+Custom signals include authorization outcomes, captured/refunded volume, provider latency, outbox publish failures, and dead-letter counts. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export traces to an OTLP collector.
+
+## API and authorization
+
+Merchant endpoints require `X-Api-Key`. Mutations also require an `Idempotency-Key` of 8–128 characters.
+
+| Scope | Method and route | Purpose |
+|---|---|---|
+| `payments:write` | `POST /api/v1/payments` | Authorize a payment |
+| `payments:read` | `GET /api/v1/payments/{id}` | Read payment and operation history |
+| `payments:write` | `POST /api/v1/payments/{id}/capture` | Full capture |
+| `payments:write` | `POST /api/v1/payments/{id}/refunds` | Partial or full refund |
+| `payments:read` | `GET /api/v1/providers` | List provider adapters |
+| `ledger:read` | `GET /api/v1/ledger/balances?currency=EUR` | Read account balances |
+| `ledger:read` | `GET /api/v1/ledger/journals` | Read recent journal metadata |
+| `settlements:write` | `POST /api/v1/settlements` | Move payable funds into settlement clearing |
+| `settlements:read` | `GET /api/v1/settlements/{id}` | Read a settlement batch |
+| anonymous + HMAC | `POST /api/v1/webhooks/{provider}` | Receive a provider event |
+
+Example authorization:
 
 ```bash
 curl -i http://localhost:8080/api/v1/payments \
   -H 'Content-Type: application/json' \
+  -H 'X-Api-Key: ${SENTINELPAY_API_KEY}' \
   -H 'Idempotency-Key: create-order-2026-0001' \
   -d '{
     "merchantReference": "order-2026-0001",
@@ -107,72 +139,45 @@ curl -i http://localhost:8080/api/v1/payments \
   }'
 ```
 
-Capture, replacing `$PAYMENT_ID` with the returned ID:
+## Double-entry ledger
 
-```bash
-curl -i -X POST "http://localhost:8080/api/v1/payments/$PAYMENT_ID/capture" \
-  -H 'Idempotency-Key: capture-order-2026-0001'
-```
+Every journal must contain at least two positive lines and satisfy total debits = total credits. The domain rejects an unbalanced journal before persistence.
 
-Partially refund €29.90:
-
-```bash
-curl -i "http://localhost:8080/api/v1/payments/$PAYMENT_ID/refunds" \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: refund-order-2026-0001-a' \
-  -d '{"amountMinor": 2990}'
-```
-
-Replay any mutating request unchanged. The API returns the same resource and adds:
-
-```http
-Idempotent-Replay: true
-```
-
-## Sandbox behavior
-
-Two adapters are available: `mock-bank` and `sandbox-wallet`.
-
-| Provider | Payment method token | Result |
+| Event | Debit | Credit |
 |---|---|---|
-| `mock-bank` | `tok_visa` or any normal token | Authorized |
-| `mock-bank` | `tok_declined` | Failed with `card_declined` |
-| `mock-bank` | `tok_insufficient_funds` | Failed with `insufficient_funds` |
-| `sandbox-wallet` | any normal token | Authorized |
-| `sandbox-wallet` | `wallet_locked` | Failed with `wallet_locked` |
+| Capture €129.90 | Provider clearing 12,990 | Merchant payable 12,990 |
+| Refund €29.90 | Merchant payable 2,990 | Provider clearing 2,990 |
+| Settle €100.00 | Merchant payable 10,000 | Settlement clearing 10,000 |
 
-Provider references are deterministic for a payment and idempotency key. No card number, CVV, or sensitive authentication data is accepted or persisted.
+The balance API exposes debits, credits, and `netMinor = credits - debits`. Amounts are always integer minor units; floating-point money is never used.
 
-## Signed webhook example
+Settlement creation locks by merchant and currency, selects unassigned payable lines through the requested period end, assigns them to one batch, writes the settlement journal, and emits its outbox event in one unit of work. The sample stops at settlement clearing; it does not pretend to execute a real bank payout.
 
-The sandbox webhook contract is:
+## Sandbox provider behavior
 
-```json
-{
-  "id": "evt_2026_0001",
-  "type": "payment.captured",
-  "providerReference": "mb_auth_..."
-}
+| Provider | Token | Result |
+|---|---|---|
+| `mock-bank` | `tok_visa` or normal token | Authorized |
+| `mock-bank` | `tok_declined` | `card_declined` |
+| `mock-bank` | `tok_insufficient_funds` | `insufficient_funds` |
+| `mock-bank` | `tok_transient_once` | First request `503`, same-key retry succeeds |
+| `mock-bank` | `tok_timeout` | Retryable provider timeout |
+| `sandbox-wallet` | normal token | Authorized |
+| `sandbox-wallet` | `wallet_locked` | `wallet_locked` |
+
+Provider references are deterministic from operation identity. The API accepts tokenized payment identifiers only and never accepts PAN or CVV.
+
+## Webhook signing
+
+The signature header follows `t=<unix-seconds>,v1=<hex-hmac>`. The signed bytes are:
+
+```text
+{timestamp}.{exact UTF-8 request body}
 ```
 
-Sign the exact UTF-8 request body with HMAC-SHA256 and send the lowercase or uppercase hexadecimal digest in `X-SentinelPay-Signature`. Development-only secrets live in `appsettings.json`; replace them through environment variables outside local use.
+Sign with the provider-specific HMAC-SHA256 secret. Signatures outside `Webhooks:SignatureToleranceSeconds` are rejected before JSON parsing or database access. Inbox uniqueness protects against repeated valid deliveries inside the window.
 
-Supported event types are `payment.captured` and `payment.failed`.
-
-## API surface
-
-| Method | Route | Purpose |
-|---|---|---|
-| `POST` | `/api/v1/payments` | Authorize a payment |
-| `GET` | `/api/v1/payments/{paymentId}` | Read current state |
-| `POST` | `/api/v1/payments/{paymentId}/capture` | Capture an authorization |
-| `POST` | `/api/v1/payments/{paymentId}/refunds` | Create a partial/full refund |
-| `GET` | `/api/v1/providers` | List configured adapters |
-| `POST` | `/api/v1/webhooks/{provider}` | Process a signed provider event |
-
-Every mutating merchant request requires an `Idempotency-Key` header between 8 and 128 characters.
-
-## Test and verify
+## Test and quality gates
 
 ```bash
 dotnet restore SentinelPay.slnx
@@ -180,42 +185,49 @@ dotnet build SentinelPay.slnx --configuration Release --no-restore
 dotnet test SentinelPay.slnx --configuration Release --no-build
 ```
 
-Integration tests start an isolated PostgreSQL container. The test suite covers replay, conflicting payloads, declined authorization, capture, and partial refund behavior. CI runs build, tests, and coverage collection on every push and pull request.
+The suite covers domain state transitions, operation completion rules, double-entry balance invariants, API authentication, tenant isolation, request replay/conflict behavior, transient operation recovery, webhook deduplication/expiry, ledger movement, and settlement. Integration tests start an isolated PostgreSQL 18 container with Testcontainers and apply the real migration.
 
-## Security posture
+Load profiles:
 
-- Stores tokenized payment method identifiers only; never raw PAN/CVV data
-- Compares payload hashes and webhook signatures in constant time
-- Uses generic public errors while retaining structured server logs and trace IDs
-- Applies per-IP fixed-window rate limits
-- Runs the application container as a non-root user with a read-only filesystem
-- Keeps sandbox secrets explicitly development-only
+```bash
+make load
+make race
+```
 
-This repository is an architecture reference, not a PCI DSS-certified processor. Production deployment requires a secrets manager, gateway-specific signing schemes, authentication/authorization, migrations, network policies, key rotation, and an audited compliance boundary. See [SECURITY.md](SECURITY.md).
+CI builds with warnings as errors, runs tests and coverage, builds the production image, and performs scheduled CodeQL analysis. Dependabot tracks NuGet, GitHub Actions, and container dependencies.
 
-## Deliberate trade-offs
+## Operational and design documentation
 
-- Full capture only; refunds can be partial or full.
-- Sandbox adapters are deterministic and do not contact external financial systems.
-- The default event publisher emits CloudEvents-shaped records to structured logs. `IEventPublisher` is the seam for Kafka, RabbitMQ, or a managed event bus.
-- Local startup uses `EnsureCreated` to make the demo one-command. Production systems should run reviewed EF migrations as a separate deployment step.
-- Redis locks reduce competing provider calls; provider idempotency and database uniqueness remain mandatory because distributed locks alone cannot guarantee exactly-once execution.
+- [Architecture deep dive](docs/architecture.md)
+- [Production runbook](docs/runbook.md)
+- [Threat model](docs/threat-model.md)
+- [Design review / interview guide](docs/design-review.md)
+- [Architecture decision records](docs/adr)
+- [Security policy](SECURITY.md)
+- [Changelog](CHANGELOG.md)
+
+## Deliberate boundaries
+
+- Full capture only; refunds may be partial or full.
+- Gateways are deterministic adapters, not integrations with real financial institutions.
+- Settlement records accounting intent; no ACH/SEPA payout rail is implemented.
+- API keys are appropriate for this service-to-service sandbox. A production control plane would add key issuance/rotation workflows, managed secrets, audit logs, and possibly mTLS or workload identity.
+- Outbox delivery is at least once. Consumer idempotency remains mandatory.
+- This is an architecture reference, not a PCI DSS-certified payment processor.
 
 ## Repository map
 
 ```text
 .
-├── src/
-│   ├── SentinelPay.Api/
-│   ├── SentinelPay.Application/
-│   ├── SentinelPay.Domain/
-│   └── SentinelPay.Infrastructure/
-├── tests/
-│   ├── SentinelPay.Domain.Tests/
-│   └── SentinelPay.IntegrationTests/
-├── docs/adr/
-├── compose.yml
-├── Dockerfile
+├── src/                         Domain, Application, Infrastructure, API
+├── tests/                       Domain and PostgreSQL integration tests
+├── docs/adr/                    Decision records
+├── load-tests/                  Lifecycle and idempotency-race k6 profiles
+├── observability/               Prometheus and provisioned Grafana dashboard
+├── scripts/                     Demo, recovery, and chaos drills
+├── compose.yml                  API, PostgreSQL, Redis, RabbitMQ, optional k6
+├── compose.observability.yml    Prometheus and Grafana overlay
+├── Dockerfile                   Non-root, read-only compatible runtime image
 └── SentinelPay.slnx
 ```
 

@@ -1,21 +1,22 @@
-# ADR 001: Persist payment idempotency keys and request hashes
+# ADR 001: Persist operation intent before remote mutation
 
 - Status: accepted
 - Date: 2026-08-08
 
 ## Context
 
-Merchants retry requests when connections time out. A retry may arrive at another application instance after the first provider call succeeded.
+Merchants retry requests when responses are lost. The application can also stop after a provider accepts a mutation but before local final state commits. A payment row that appears only after provider success cannot distinguish “never attempted” from “attempted with unknown result.”
 
 ## Decision
 
-Every mutating merchant operation requires an idempotency key. Create operations store the key and a canonical SHA-256 request fingerprint with the payment. Refunds store both on the refund row. A matching retry returns the existing resource; a different fingerprint returns a conflict.
+Every authorize, capture, refund, and reconciliation mutation has a `PaymentOperation` with `Started`, `Succeeded`, or `Failed` status. Merchant operations are unique by `(MerchantId, Type, IdempotencyKey)` and store a canonical SHA-256 request fingerprint.
 
-The same key is forwarded to provider adapters.
+The application commits a new `Started` operation before invoking the provider. It forwards the same key to the provider. A matching retry resumes `Started`, replays completed results, and rejects a changed fingerprint.
 
 ## Consequences
 
-- Safe retries become an explicit part of the public contract.
-- Keys require retention and uniqueness policy.
-- Provider adapters must preserve native idempotency semantics.
-- Payload canonicalization becomes versioned behavior and must not change silently.
+- Ambiguous attempts are durable and queryable.
+- Remote mutations require two local commits.
+- Real adapters must map operation identity to provider-native idempotency or lookup.
+- Request canonicalization is versioned behavior and cannot change silently.
+- Completed provider declines are replayed without another provider call.
