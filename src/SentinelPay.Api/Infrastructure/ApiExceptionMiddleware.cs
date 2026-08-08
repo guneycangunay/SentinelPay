@@ -4,6 +4,7 @@ using SentinelPay.Application.Abstractions;
 using SentinelPay.Application.Payments;
 using SentinelPay.Application.Settlements;
 using SentinelPay.Domain;
+using SentinelPay.Domain.Payments;
 
 namespace SentinelPay.Api.Infrastructure;
 
@@ -11,11 +12,16 @@ public sealed class ApiExceptionMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly ILogger<ApiExceptionMiddleware> _logger;
+    private readonly IHostEnvironment _environment;
 
-    public ApiExceptionMiddleware(RequestDelegate next, ILogger<ApiExceptionMiddleware> logger)
+    public ApiExceptionMiddleware(
+        RequestDelegate next,
+        ILogger<ApiExceptionMiddleware> logger,
+        IHostEnvironment environment)
     {
         _next = next;
         _logger = logger;
+        _environment = environment;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -32,6 +38,10 @@ public sealed class ApiExceptionMiddleware
 
     private async Task WriteProblemAsync(HttpContext context, Exception exception)
     {
+        var concurrencyExtensions = exception is DbUpdateConcurrencyException concurrencyException &&
+            _environment.IsEnvironment("Testing")
+                ? await GetConcurrencyDiagnosticsAsync(concurrencyException, context.RequestAborted)
+                : EmptyExtensions();
         var (status, type, title, detail, extensions) = exception switch
         {
             PaymentNotFoundException => (
@@ -123,7 +133,7 @@ public sealed class ApiExceptionMiddleware
                 "https://sentinelpay.dev/problems/concurrent-update",
                 "Concurrent payment update",
                 "The payment changed during this operation. Retry with the same idempotency key.",
-                EmptyExtensions()),
+                concurrencyExtensions),
             DbUpdateException { InnerException: PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } } => (
                 StatusCodes.Status409Conflict,
                 "https://sentinelpay.dev/problems/duplicate-resource",
@@ -161,6 +171,26 @@ public sealed class ApiExceptionMiddleware
             traceId = context.TraceIdentifier,
             extensions
         });
+    }
+
+    private static async Task<Dictionary<string, object?>> GetConcurrencyDiagnosticsAsync(
+        DbUpdateConcurrencyException exception,
+        CancellationToken cancellationToken)
+    {
+        var entry = exception.Entries.SingleOrDefault(candidate => candidate.Entity is Payment);
+        if (entry is null)
+        {
+            return EmptyExtensions();
+        }
+
+        var databaseValues = await entry.GetDatabaseValuesAsync(cancellationToken);
+        return new Dictionary<string, object?>
+        {
+            ["entity"] = nameof(Payment),
+            ["expectedVersion"] = entry.OriginalValues[nameof(Payment.Version)],
+            ["attemptedVersion"] = entry.CurrentValues[nameof(Payment.Version)],
+            ["databaseVersion"] = databaseValues?[nameof(Payment.Version)]
+        };
     }
 
     private static Dictionary<string, object?> EmptyExtensions() => [];

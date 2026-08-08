@@ -141,7 +141,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             new { amountMinor = 12_990 },
             "capture-lifecycle-0001");
         using var captureResponse = await Client.SendAsync(captureMessage, TestContext.Current.CancellationToken);
-        Assert.Equal(HttpStatusCode.OK, captureResponse.StatusCode);
+        await AssertStatusAsync(HttpStatusCode.OK, captureResponse);
 
         using var invalidRefundMessage = CreatePost(
             $"/api/v1/payments/{paymentId}/refunds",
@@ -230,7 +230,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
         using var first = await Client.SendAsync(firstMessage, TestContext.Current.CancellationToken);
         using var second = await Client.SendAsync(secondMessage, TestContext.Current.CancellationToken);
 
-        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        await AssertStatusAsync(HttpStatusCode.Accepted, first);
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
         Assert.True(second.Headers.Contains("Idempotent-Replay"));
 
@@ -265,7 +265,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             new { amountMinor = 8_000 },
             "capture-ledger-0001");
         using var captureResponse = await Client.SendAsync(captureMessage, TestContext.Current.CancellationToken);
-        Assert.Equal(HttpStatusCode.OK, captureResponse.StatusCode);
+        await AssertStatusAsync(HttpStatusCode.OK, captureResponse);
 
         using var refundMessage = CreatePost(
             $"/api/v1/payments/{paymentId}/refunds",
@@ -336,7 +336,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             new { authenticationResultToken = "auth_success" },
             "confirm-3ds-0001");
         using var confirmResponse = await Client.SendAsync(confirmMessage, TestContext.Current.CancellationToken);
-        Assert.Equal(HttpStatusCode.OK, confirmResponse.StatusCode);
+        await AssertStatusAsync(HttpStatusCode.OK, confirmResponse);
         var confirmed = await ReadJsonAsync(confirmResponse);
         Assert.Equal("Authorized", confirmed.RootElement.GetProperty("status").GetString());
         Assert.Equal(JsonValueKind.Null, confirmed.RootElement.GetProperty("nextAction").ValueKind);
@@ -364,7 +364,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             new { amountMinor = 4_000 },
             "capture-multi-0001");
         using var firstResponse = await Client.SendAsync(firstCapture, TestContext.Current.CancellationToken);
-        Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+        await AssertStatusAsync(HttpStatusCode.OK, firstResponse);
 
         using var secondCapture = CreatePost(
             $"/api/v1/payments/{paymentId}/capture",
@@ -494,4 +494,16 @@ public sealed class PaymentApiTests : IAsyncLifetime
 
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response) =>
         JsonDocument.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+
+    private static async Task AssertStatusAsync(HttpStatusCode expected, HttpResponseMessage response)
+    {
+        if (response.StatusCode == expected)
+        {
+            return;
+        }
+
+        var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+        Assert.Fail($"Expected HTTP {(int)expected} ({expected}), received {(int)response.StatusCode} " +
+            $"({response.StatusCode}). Response: {body}");
+    }
 }
