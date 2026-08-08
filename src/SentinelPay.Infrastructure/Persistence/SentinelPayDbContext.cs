@@ -29,6 +29,20 @@ public sealed class SentinelPayDbContext : DbContext
     public DbSet<ReconciliationReport> ReconciliationReports => Set<ReconciliationReport>();
     public DbSet<ReconciliationIssue> ReconciliationIssues => Set<ReconciliationIssue>();
 
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        IncrementPaymentVersions();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(
+        bool acceptAllChangesOnSuccess,
+        CancellationToken cancellationToken = default)
+    {
+        IncrementPaymentVersions();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.HasDefaultSchema("sentinelpay");
@@ -71,7 +85,9 @@ public sealed class SentinelPayDbContext : DbContext
             entity.Property(payment => payment.Status).HasConversion<string>().HasMaxLength(32);
             entity.Property(payment => payment.FailureCode).HasMaxLength(80);
             entity.Property(payment => payment.FailureMessage).HasMaxLength(500);
-            entity.Property(payment => payment.Version).IsRowVersion();
+            entity.Property(payment => payment.Version)
+                .HasDefaultValue(0L)
+                .IsConcurrencyToken();
             entity.HasIndex(payment => new { payment.MerchantId, payment.IdempotencyKey }).IsUnique();
             entity.HasIndex(payment => new { payment.MerchantId, payment.MerchantReference });
             entity.HasIndex(payment => new { payment.Status, payment.UpdatedAt });
@@ -286,5 +302,15 @@ public sealed class SentinelPayDbContext : DbContext
                 .HasForeignKey(issue => issue.PaymentId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
+    }
+
+    private void IncrementPaymentVersions()
+    {
+        foreach (var entry in ChangeTracker.Entries<Payment>()
+                     .Where(entry => entry.State == EntityState.Modified))
+        {
+            var version = entry.Property(payment => payment.Version);
+            version.CurrentValue = checked(version.OriginalValue + 1);
+        }
     }
 }

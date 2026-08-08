@@ -58,7 +58,7 @@ public sealed class Payment
     public DateTimeOffset? AuthorizedAt { get; private set; }
     public DateTimeOffset? CapturedAt { get; private set; }
     public DateTimeOffset? AuthorizationClosedAt { get; private set; }
-    public uint Version { get; private set; }
+    public long Version { get; private set; }
     public long RemainingAuthorizedAmountMinor => Status is PaymentStatus.Authorized or PaymentStatus.PartiallyCaptured
         ? AmountMinor - CapturedAmountMinor - VoidedAmountMinor
         : 0;
