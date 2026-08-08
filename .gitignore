@@ -10,3 +10,4 @@ coverage/
 *.suo
 *.nupkg
 .env
+*.log

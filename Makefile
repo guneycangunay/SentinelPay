@@ -1,21 +1,34 @@
-.PHONY: up down logs test format verify
+.PHONY: up down logs build test demo recovery chaos load race observability
 
 up:
-	docker compose up --build -d
+	docker compose up --build --detach
 
 down:
 	docker compose down
 
 logs:
-	docker compose logs -f api
+	docker compose logs --follow api
+
+build:
+	dotnet build SentinelPay.slnx --configuration Release
 
 test:
 	dotnet test SentinelPay.slnx --configuration Release
 
-format:
-	dotnet format SentinelPay.slnx
+demo:
+	./scripts/demo.sh
 
-verify:
-	dotnet restore SentinelPay.slnx
-	dotnet build SentinelPay.slnx --configuration Release --no-restore
-	dotnet test SentinelPay.slnx --configuration Release --no-build
+recovery:
+	./scripts/demo-recovery.sh
+
+chaos:
+	./scripts/chaos-outbox.sh
+
+load:
+	docker compose --profile loadtest run --rm loadtest
+
+race:
+	docker compose --profile loadtest run --rm loadtest run /scripts/idempotency-race.js
+
+observability:
+	docker compose -f compose.yml -f compose.observability.yml up --build --detach

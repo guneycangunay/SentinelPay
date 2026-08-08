@@ -1,0 +1,66 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        { "expr": "sum by (provider) (rate(sentinelpay_payments_authorized_total[5m]))", "legendFormat": "authorized {{provider}}", "refId": "A" },
+        { "expr": "sum by (provider) (rate(sentinelpay_payments_failed_total[5m]))", "legendFormat": "failed {{provider}}", "refId": "B" }
+      ],
+      "title": "Authorization outcomes / second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le, provider, operation) (rate(sentinelpay_provider_duration_milliseconds_bucket[5m])))", "legendFormat": "p95 {{provider}} / {{operation}}", "refId": "A" }
+      ],
+      "title": "Provider latency p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "targets": [
+        { "expr": "sum(rate(sentinelpay_outbox_published_total[5m]))", "legendFormat": "published", "refId": "A" },
+        { "expr": "sum(rate(sentinelpay_outbox_failed_total[5m]))", "legendFormat": "failed", "refId": "B" },
+        { "expr": "sum(increase(sentinelpay_outbox_dead_lettered_total[15m]))", "legendFormat": "dead-lettered", "refId": "C" }
+      ],
+      "title": "Outbox delivery",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le, http_request_method, http_response_status_code) (rate(http_server_request_duration_seconds_bucket[5m])))", "legendFormat": "{{http_request_method}} {{http_response_status_code}}", "refId": "A" }
+      ],
+      "title": "HTTP latency p95",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["sentinelpay", "payments"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "browser",
+  "title": "SentinelPay Reliability Overview",
+  "uid": "sentinelpay-reliability",
+  "version": 1
+}
