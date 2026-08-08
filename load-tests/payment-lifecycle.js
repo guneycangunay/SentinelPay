@@ -27,6 +27,16 @@ export const options = {
 const baseUrl = __ENV.BASE_URL || 'http://localhost:8080';
 const apiKey = __ENV.API_KEY || '${SENTINELPAY_API_KEY}';
 
+export function setup() {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const response = http.get(`${baseUrl}/health/ready`);
+    if (response.status === 200) return;
+    sleep(2);
+  }
+
+  throw new Error('SentinelPay did not become ready within 60 seconds.');
+}
+
 function headers(idempotencyKey) {
   return {
     'Content-Type': 'application/json',
@@ -38,15 +48,16 @@ function headers(idempotencyKey) {
 export default function () {
   const operationId = `${exec.scenario.iterationInTest}-${Date.now()}-${__VU}`;
   const createKey = `k6-create-${operationId}`;
+  const payload = JSON.stringify({
+    merchantReference: `load-${operationId}`,
+    amountMinor: 12990,
+    currency: 'EUR',
+    provider: 'mock-bank',
+    paymentMethodToken: 'tok_visa',
+  });
   const create = http.post(
     `${baseUrl}/api/v1/payments`,
-    JSON.stringify({
-      merchantReference: `load-${operationId}`,
-      amountMinor: 12990,
-      currency: 'EUR',
-      provider: 'mock-bank',
-      paymentMethodToken: 'tok_visa',
-    }),
+    payload,
     { headers: headers(createKey), tags: { operation: 'authorize' } },
   );
 
@@ -59,7 +70,7 @@ export default function () {
   const paymentId = create.json('id');
   const replay = http.post(
     `${baseUrl}/api/v1/payments`,
-    create.request.body,
+    payload,
     { headers: headers(createKey), tags: { operation: 'authorize-replay' } },
   );
   check(replay, {

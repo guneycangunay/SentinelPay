@@ -3,13 +3,13 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using SentinelPay.Application.Abstractions;
 using SentinelPay.Application.Payments;
+using SentinelPay.Application.Settlements;
 using SentinelPay.Infrastructure.Locking;
 using SentinelPay.Infrastructure.Ledger;
 using SentinelPay.Infrastructure.Outbox;
 using SentinelPay.Infrastructure.Payments;
 using SentinelPay.Infrastructure.Persistence;
 using SentinelPay.Infrastructure.Settlements;
-using SentinelPay.Application.Settlements;
 using StackExchange.Redis;
 
 namespace SentinelPay.Infrastructure;

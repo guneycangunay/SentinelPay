@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using SentinelPay.Application.Abstractions;
 using SentinelPay.Domain.Merchants;
 using SentinelPay.Infrastructure.Security;
 
@@ -9,11 +10,16 @@ public sealed class DatabaseInitializer
 {
     private readonly SentinelPayDbContext _dbContext;
     private readonly IConfiguration _configuration;
+    private readonly IClock _clock;
 
-    public DatabaseInitializer(SentinelPayDbContext dbContext, IConfiguration configuration)
+    public DatabaseInitializer(
+        SentinelPayDbContext dbContext,
+        IConfiguration configuration,
+        IClock clock)
     {
         _dbContext = dbContext;
         _configuration = configuration;
+        _clock = clock;
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -33,7 +39,7 @@ public sealed class DatabaseInitializer
         if (!await _dbContext.Merchants.AnyAsync(merchant => merchant.Id == merchantId, cancellationToken))
         {
             await _dbContext.Merchants.AddAsync(
-                Merchant.Create(merchantId, name, DateTimeOffset.UtcNow),
+                Merchant.Create(merchantId, name, _clock.UtcNow),
                 cancellationToken);
         }
 
@@ -49,7 +55,7 @@ public sealed class DatabaseInitializer
                 Name = "development-full-access",
                 KeyHash = keyHash,
                 Scopes = "payments:read payments:write ledger:read settlements:read settlements:write",
-                CreatedAt = DateTimeOffset.UtcNow
+                CreatedAt = _clock.UtcNow
             }, cancellationToken);
         }
 

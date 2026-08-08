@@ -20,7 +20,7 @@ public sealed class MockBankGateway : IPaymentGateway
         await Task.Delay(TimeSpan.FromMilliseconds(60), cancellationToken);
 
         if (request.PaymentMethodToken.Equals("tok_transient_once", StringComparison.OrdinalIgnoreCase) &&
-            _stateStore.ShouldFailOnce(request.IdempotencyKey))
+            _stateStore.ShouldFailOnce($"{request.PaymentId:N}:{request.IdempotencyKey}"))
         {
             throw new HttpRequestException("Simulated transient provider connection failure.");
         }
@@ -36,7 +36,10 @@ public sealed class MockBankGateway : IPaymentGateway
             "tok_insufficient_funds" => new(false, null, "insufficient_funds", "The card has insufficient funds."),
             _ => new(
                 true,
-                DeterministicReference.Create("mb_auth", request.IdempotencyKey),
+                DeterministicReference.Create(
+                    "mb_auth",
+                    request.PaymentId.ToString("N"),
+                    request.IdempotencyKey),
                 null,
                 null)
         };

@@ -74,6 +74,19 @@ public sealed class PaymentTests
         Assert.Equal(payment.CapturedAmountMinor, payment.RefundedAmountMinor);
     }
 
+    [Fact]
+    public void Refund_RejectsAmountAboveRemainingBalanceWithoutMutation()
+    {
+        var payment = CreatePayment();
+        payment.MarkAuthorized("auth_123", Now.AddSeconds(1));
+        payment.Capture(payment.AmountMinor, Now.AddSeconds(2));
+
+        Assert.Throws<DomainException>(() => payment.EnsureCanRefund(payment.AmountMinor + 1));
+        Assert.Equal(PaymentStatus.Captured, payment.Status);
+        Assert.Equal(0, payment.RefundedAmountMinor);
+        Assert.Empty(payment.Refunds);
+    }
+
     private static Payment CreatePayment(
         long amountMinor = 12_990,
         string currency = "EUR",

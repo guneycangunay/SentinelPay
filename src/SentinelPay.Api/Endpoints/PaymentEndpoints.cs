@@ -1,6 +1,6 @@
+using SentinelPay.Api.Security;
 using SentinelPay.Application.Abstractions;
 using SentinelPay.Application.Payments;
-using SentinelPay.Api.Security;
 
 namespace SentinelPay.Api.Endpoints;
 

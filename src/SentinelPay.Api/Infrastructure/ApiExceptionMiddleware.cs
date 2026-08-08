@@ -1,8 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using SentinelPay.Application.Abstractions;
 using SentinelPay.Application.Payments;
-using SentinelPay.Domain;
 using SentinelPay.Application.Settlements;
+using SentinelPay.Domain;
 
 namespace SentinelPay.Api.Infrastructure;
 
@@ -105,6 +106,12 @@ public sealed class ApiExceptionMiddleware
                 "Invalid request",
                 exception.Message,
                 EmptyExtensions()),
+            DistributedLockUnavailableException => (
+                StatusCodes.Status503ServiceUnavailable,
+                "https://sentinelpay.dev/problems/coordination-unavailable",
+                "Coordination service unavailable",
+                "The operation cannot be safely coordinated. Retry with the same idempotency key.",
+                new Dictionary<string, object?> { ["retryable"] = true }),
             TimeoutException => (
                 StatusCodes.Status503ServiceUnavailable,
                 "https://sentinelpay.dev/problems/concurrency-timeout",

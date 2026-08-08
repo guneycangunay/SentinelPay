@@ -26,7 +26,10 @@ public sealed class SandboxWalletGateway : IPaymentGateway
 
         var result = new GatewayAuthorizationResult(
             true,
-            DeterministicReference.Create("sw_auth", request.IdempotencyKey),
+            DeterministicReference.Create(
+                "sw_auth",
+                request.PaymentId.ToString("N"),
+                request.IdempotencyKey),
             null,
             null);
         _stateStore.SetState(result.ProviderReference!, GatewayPaymentState.Authorized);

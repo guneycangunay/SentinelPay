@@ -1,7 +1,7 @@
 using Microsoft.EntityFrameworkCore;
-using SentinelPay.Domain.Payments;
 using SentinelPay.Domain.Ledger;
 using SentinelPay.Domain.Merchants;
+using SentinelPay.Domain.Payments;
 using SentinelPay.Domain.Settlements;
 using SentinelPay.Infrastructure.Security;
 

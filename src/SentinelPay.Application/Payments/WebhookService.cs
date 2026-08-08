@@ -68,6 +68,14 @@ public sealed class WebhookService
             throw new InvalidWebhookPayloadException("Webhook id, type and providerReference are required.");
         }
 
+        if (webhook.Id.Length > 160 ||
+            webhook.Type.Length > 160 ||
+            webhook.ProviderReference.Length > 120 ||
+            (webhook.ErrorCode is not null && webhook.ErrorCode.Length > 80))
+        {
+            throw new InvalidWebhookPayloadException("Webhook field length exceeds the provider contract.");
+        }
+
         await using var lease = await _distributedLock.AcquireAsync(
             $"webhook:{normalizedProvider}:{webhook.Id}",
             TimeSpan.FromSeconds(30),
@@ -83,10 +91,13 @@ public sealed class WebhookService
             webhook.ProviderReference,
             cancellationToken) ?? throw new InvalidWebhookPayloadException(
                 "No payment matches the webhook provider reference.");
+        var payloadHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
+        var operationIdentity = Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes($"{normalizedProvider}:{webhook.Id}")));
         var operation = payment.StartOperation(
             PaymentOperationType.Reconcile,
-            $"{normalizedProvider}:{webhook.Id}",
-            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))),
+            $"webhook:{operationIdentity}",
+            payloadHash,
             _clock.UtcNow);
 
         switch (webhook.Type.ToLowerInvariant())
@@ -113,12 +124,20 @@ public sealed class WebhookService
             normalizedProvider,
             webhook.Id,
             webhook.Type,
-            operation.RequestHash,
+            payloadHash,
             _clock.UtcNow);
         _outbox.Add(
-            "provider.webhook-processed.v1",
+            "provider.webhook-processed.v2",
             payment.Id,
-            new { Provider = normalizedProvider, webhook.Id, webhook.Type, payment.Status },
+            new
+            {
+                PaymentId = payment.Id,
+                payment.MerchantId,
+                Provider = normalizedProvider,
+                webhook.Id,
+                webhook.Type,
+                payment.Status
+            },
             _clock.UtcNow);
         await _paymentStore.SaveChangesAsync(cancellationToken);
         return new WebhookResult(false);

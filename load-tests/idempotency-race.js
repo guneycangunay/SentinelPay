@@ -1,5 +1,5 @@
 import http from 'k6/http';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 
 export const options = {
   scenarios: {
@@ -17,7 +17,17 @@ export const options = {
 
 const baseUrl = __ENV.BASE_URL || 'http://localhost:8080';
 const apiKey = __ENV.API_KEY || '${SENTINELPAY_API_KEY}';
-const raceId = __ENV.RACE_ID || `race-${Date.now()}`;
+const raceId = __ENV.RACE_ID || 'local-race';
+
+export function setup() {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const response = http.get(`${baseUrl}/health/ready`);
+    if (response.status === 200) return;
+    sleep(2);
+  }
+
+  throw new Error('SentinelPay did not become ready.');
+}
 
 export default function () {
   const response = http.post(

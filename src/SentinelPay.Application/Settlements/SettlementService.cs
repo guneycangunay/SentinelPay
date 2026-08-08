@@ -31,17 +31,26 @@ public sealed class SettlementService
         CreateSettlementCommand command,
         CancellationToken cancellationToken)
     {
+        var idempotencyKey = command.IdempotencyKey?.Trim() ?? string.Empty;
         if (command.MerchantId == Guid.Empty ||
-            string.IsNullOrWhiteSpace(command.IdempotencyKey) ||
-            command.IdempotencyKey.Length is < 8 or > 128)
+            string.IsNullOrWhiteSpace(command.Currency) ||
+            idempotencyKey.Length is < 8 or > 128)
         {
             throw new ArgumentException("Merchant and a valid idempotency key are required.");
         }
 
         var currency = command.Currency.Trim().ToUpperInvariant();
-        if (currency.Length != 3)
+        if (currency.Length != 3 || currency.Any(character => !char.IsLetter(character)))
         {
             throw new ArgumentException("Currency must be a three-letter ISO 4217 code.");
+        }
+
+        var periodEnd = DateTimeOffset.FromUnixTimeMilliseconds(
+            command.PeriodEnd.ToUniversalTime().ToUnixTimeMilliseconds());
+        var now = _clock.UtcNow;
+        if (periodEnd > now)
+        {
+            throw new ArgumentException("Settlement period end cannot be in the future.");
         }
 
         await using var lease = await _distributedLock.AcquireAsync(
@@ -51,11 +60,11 @@ public sealed class SettlementService
 
         var existing = await _store.GetByIdempotencyKeyAsync(
             command.MerchantId,
-            command.IdempotencyKey,
+            idempotencyKey,
             cancellationToken);
         if (existing is not null)
         {
-            if (existing.Currency != currency || existing.PeriodEnd != command.PeriodEnd)
+            if (existing.Currency != currency || existing.PeriodEnd != periodEnd)
             {
                 throw new IdempotencyConflictException(
                     "The settlement idempotency key was already used with a different currency or period end.");
@@ -67,7 +76,7 @@ public sealed class SettlementService
         var lines = await _store.GetUnsettledPayableLinesAsync(
             command.MerchantId,
             currency,
-            command.PeriodEnd,
+            periodEnd,
             cancellationToken);
         var amountMinor = lines.Sum(line =>
             line.Direction == LedgerDirection.Credit ? line.AmountMinor : -line.AmountMinor);
@@ -80,16 +89,16 @@ public sealed class SettlementService
             command.MerchantId,
             currency,
             amountMinor,
-            command.IdempotencyKey,
-            command.PeriodEnd,
-            _clock.UtcNow);
+            idempotencyKey,
+            periodEnd,
+            now);
         foreach (var line in lines)
         {
             line.AssignToSettlement(settlement.Id);
         }
 
         await _store.AddAsync(settlement, cancellationToken);
-        await _ledger.RecordSettlementAsync(settlement, _clock.UtcNow, cancellationToken);
+        await _ledger.RecordSettlementAsync(settlement, now, cancellationToken);
         _outbox.Add(
             "settlement.created.v1",
             settlement.Id,
@@ -101,7 +110,7 @@ public sealed class SettlementService
                 settlement.AmountMinor,
                 settlement.PeriodEnd
             },
-            _clock.UtcNow);
+            now);
         await _store.SaveChangesAsync(cancellationToken);
         return new SettlementResult(SettlementResponse.From(settlement), false);
     }

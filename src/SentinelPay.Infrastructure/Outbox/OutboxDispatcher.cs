@@ -1,10 +1,11 @@
+using System.Diagnostics.Metrics;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using SentinelPay.Application.Abstractions;
 using SentinelPay.Infrastructure.Persistence;
-using System.Diagnostics.Metrics;
 
 namespace SentinelPay.Infrastructure.Outbox;
 
@@ -17,6 +18,7 @@ public sealed class OutboxDispatcher : BackgroundService
     private readonly string _workerId = $"{Environment.MachineName}:{Guid.NewGuid():N}";
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<OutboxDispatcher> _logger;
+    private readonly IClock _clock;
     private readonly int _batchSize;
     private readonly int _maxAttempts;
     private readonly TimeSpan _emptyQueueDelay;
@@ -25,10 +27,12 @@ public sealed class OutboxDispatcher : BackgroundService
     public OutboxDispatcher(
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
+        IClock clock,
         ILogger<OutboxDispatcher> logger)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
+        _clock = clock;
         _batchSize = Math.Clamp(configuration.GetValue("Outbox:BatchSize", 20), 1, 200);
         _maxAttempts = Math.Clamp(configuration.GetValue("Outbox:MaxAttempts", 12), 1, 100);
         _emptyQueueDelay = TimeSpan.FromMilliseconds(
@@ -72,7 +76,7 @@ public sealed class OutboxDispatcher : BackgroundService
         await using var scope = _scopeFactory.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<SentinelPayDbContext>();
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-        var now = DateTimeOffset.UtcNow;
+        var now = _clock.UtcNow;
 
         var messages = await dbContext.OutboxMessages
             .FromSqlInterpolated($$"""
@@ -125,7 +129,8 @@ public sealed class OutboxDispatcher : BackgroundService
                     "application/json",
                     message.Payload),
                 cancellationToken);
-            message.ProcessedAt = DateTimeOffset.UtcNow;
+            message.ProcessedAt = _clock.UtcNow;
+            message.NextAttemptAt = null;
             message.LastError = null;
             message.LockedBy = null;
             message.LockedUntil = null;
@@ -134,10 +139,10 @@ public sealed class OutboxDispatcher : BackgroundService
         catch (Exception exception)
         {
             message.AttemptCount++;
-            message.LastError = exception.Message;
+            message.LastError = exception.Message[..Math.Min(exception.Message.Length, 2_000)];
             if (message.AttemptCount >= _maxAttempts)
             {
-                message.DeadLetteredAt = DateTimeOffset.UtcNow;
+                message.DeadLetteredAt = _clock.UtcNow;
                 message.NextAttemptAt = null;
                 DeadLettered.Add(1, new KeyValuePair<string, object?>("event.type", message.EventType));
                 _logger.LogError(
@@ -149,7 +154,7 @@ public sealed class OutboxDispatcher : BackgroundService
             else
             {
                 var seconds = Math.Min(300, Math.Pow(2, Math.Min(8, message.AttemptCount)));
-                message.NextAttemptAt = DateTimeOffset.UtcNow.AddSeconds(seconds);
+                message.NextAttemptAt = _clock.UtcNow.AddSeconds(seconds);
                 _logger.LogWarning(
                     exception,
                     "Publishing outbox message {MessageId} failed on attempt {AttemptCount}.",

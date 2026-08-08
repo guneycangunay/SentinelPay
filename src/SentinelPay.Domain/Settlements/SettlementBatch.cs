@@ -50,17 +50,29 @@ public sealed class SettlementBatch
         DateTimeOffset periodEnd,
         DateTimeOffset now)
     {
-        if (merchantId == Guid.Empty || amountMinor <= 0 || string.IsNullOrWhiteSpace(idempotencyKey))
+        var normalizedCurrency = currency?.Trim().ToUpperInvariant() ?? string.Empty;
+        var normalizedKey = idempotencyKey?.Trim() ?? string.Empty;
+        if (merchantId == Guid.Empty || amountMinor <= 0)
         {
             throw new DomainException("Settlement requires a merchant and a positive balance.");
+        }
+
+        if (normalizedCurrency.Length != 3 || normalizedCurrency.Any(character => !char.IsLetter(character)))
+        {
+            throw new DomainException("Settlement currency must be a three-letter ISO 4217 code.");
+        }
+
+        if (normalizedKey.Length is < 8 or > 128)
+        {
+            throw new DomainException("Settlement idempotency key length must be between 8 and 128 characters.");
         }
 
         return new SettlementBatch(
             Guid.NewGuid(),
             merchantId,
-            currency.ToUpperInvariant(),
+            normalizedCurrency,
             amountMinor,
-            idempotencyKey.Trim(),
+            normalizedKey,
             periodEnd,
             now);
     }

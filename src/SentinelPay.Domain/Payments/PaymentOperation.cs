@@ -67,8 +67,8 @@ public sealed class PaymentOperation
     public void Fail(string errorCode, string errorMessage, DateTimeOffset now)
     {
         EnsureStarted();
-        ErrorCode = errorCode;
-        ErrorMessage = errorMessage;
+        ErrorCode = Truncate(errorCode, 80);
+        ErrorMessage = Truncate(errorMessage, 500);
         Status = PaymentOperationStatus.Failed;
         CompletedAt = now;
         UpdatedAt = now;
@@ -81,4 +81,7 @@ public sealed class PaymentOperation
             throw new DomainException($"Operation '{Id}' has already completed.");
         }
     }
+
+    private static string Truncate(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength];
 }

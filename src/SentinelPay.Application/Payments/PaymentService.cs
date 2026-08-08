@@ -1,5 +1,5 @@
-using System.Globalization;
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using SentinelPay.Application.Abstractions;
@@ -39,7 +39,7 @@ public sealed class PaymentService
         CancellationToken cancellationToken)
     {
         ValidateMerchant(command.MerchantId);
-        ValidateIdempotencyKey(command.IdempotencyKey);
+        var idempotencyKey = NormalizeIdempotencyKey(command.IdempotencyKey);
         ValidateCreateCommand(command);
         var requestHash = Hash(
             command.MerchantId.ToString("N"),
@@ -50,13 +50,13 @@ public sealed class PaymentService
             command.PaymentMethodToken.Trim());
 
         await using var lease = await _distributedLock.AcquireAsync(
-            $"payment:create:{command.MerchantId:N}:{command.IdempotencyKey}",
+            $"payment:create:{command.MerchantId:N}:{idempotencyKey}",
             LockExpiry,
             cancellationToken);
 
         var payment = await _store.GetByIdempotencyKeyAsync(
             command.MerchantId,
-            command.IdempotencyKey,
+            idempotencyKey,
             cancellationToken);
         PaymentOperation operation;
 
@@ -78,12 +78,12 @@ public sealed class PaymentService
                 command.AmountMinor,
                 command.Currency,
                 gateway.Name,
-                command.IdempotencyKey,
+                idempotencyKey,
                 requestHash,
                 _clock.UtcNow);
             operation = payment.StartOperation(
                 PaymentOperationType.Authorize,
-                command.IdempotencyKey,
+                idempotencyKey,
                 requestHash,
                 _clock.UtcNow);
             await _store.AddAsync(payment, cancellationToken);
@@ -102,7 +102,7 @@ public sealed class PaymentService
                     payment.AmountMinor,
                     payment.Currency,
                     command.PaymentMethodToken,
-                    command.IdempotencyKey),
+                    idempotencyKey),
                 cancellationToken))
             .ConfigureAwait(false);
         PaymentTelemetry.RecordProviderLatency(payment.Provider, "authorize", stopwatch.Elapsed);
@@ -164,7 +164,7 @@ public sealed class PaymentService
         CancellationToken cancellationToken)
     {
         ValidateMerchant(command.MerchantId);
-        ValidateIdempotencyKey(command.IdempotencyKey);
+        var idempotencyKey = NormalizeIdempotencyKey(command.IdempotencyKey);
         var requestHash = Hash(command.MerchantId.ToString("N"), command.PaymentId.ToString("N"), "capture-full");
 
         await using var lease = await _distributedLock.AcquireAsync(
@@ -174,7 +174,7 @@ public sealed class PaymentService
 
         var payment = await _store.GetAsync(command.MerchantId, command.PaymentId, cancellationToken)
             ?? throw new PaymentNotFoundException(command.PaymentId);
-        var operation = FindOperation(payment, PaymentOperationType.Capture, command.IdempotencyKey);
+        var operation = FindOperation(payment, PaymentOperationType.Capture, idempotencyKey);
 
         if (operation is not null)
         {
@@ -196,7 +196,7 @@ public sealed class PaymentService
 
             operation = payment.StartOperation(
                 PaymentOperationType.Capture,
-                command.IdempotencyKey,
+                idempotencyKey,
                 requestHash,
                 _clock.UtcNow);
             await _store.SaveChangesAsync(cancellationToken);
@@ -212,7 +212,7 @@ public sealed class PaymentService
                     payment.Id,
                     payment.ProviderReference ?? throw new InvalidOperationException("Payment is missing a provider reference."),
                     payment.AmountMinor,
-                    command.IdempotencyKey),
+                    idempotencyKey),
                 cancellationToken))
             .ConfigureAwait(false);
         PaymentTelemetry.RecordProviderLatency(payment.Provider, "capture", stopwatch.Elapsed);
@@ -244,7 +244,7 @@ public sealed class PaymentService
         CancellationToken cancellationToken)
     {
         ValidateMerchant(command.MerchantId);
-        ValidateIdempotencyKey(command.IdempotencyKey);
+        var idempotencyKey = NormalizeIdempotencyKey(command.IdempotencyKey);
         var requestHash = Hash(
             command.MerchantId.ToString("N"),
             command.PaymentId.ToString("N"),
@@ -257,7 +257,7 @@ public sealed class PaymentService
 
         var payment = await _store.GetAsync(command.MerchantId, command.PaymentId, cancellationToken)
             ?? throw new PaymentNotFoundException(command.PaymentId);
-        var operation = FindOperation(payment, PaymentOperationType.Refund, command.IdempotencyKey);
+        var operation = FindOperation(payment, PaymentOperationType.Refund, idempotencyKey);
 
         if (operation is not null)
         {
@@ -274,7 +274,7 @@ public sealed class PaymentService
             payment.EnsureCanRefund(command.AmountMinor);
             operation = payment.StartOperation(
                 PaymentOperationType.Refund,
-                command.IdempotencyKey,
+                idempotencyKey,
                 requestHash,
                 _clock.UtcNow);
             await _store.SaveChangesAsync(cancellationToken);
@@ -292,7 +292,7 @@ public sealed class PaymentService
                     refundId,
                     payment.ProviderReference ?? throw new InvalidOperationException("Payment is missing a provider reference."),
                     command.AmountMinor,
-                    command.IdempotencyKey),
+                    idempotencyKey),
                 cancellationToken))
             .ConfigureAwait(false);
         PaymentTelemetry.RecordProviderLatency(payment.Provider, "refund", stopwatch.Elapsed);
@@ -312,7 +312,7 @@ public sealed class PaymentService
             refundId,
             command.AmountMinor,
             providerReference,
-            command.IdempotencyKey,
+            idempotencyKey,
             requestHash,
             _clock.UtcNow);
         operation.Succeed(providerReference, _clock.UtcNow);
@@ -385,12 +385,15 @@ public sealed class PaymentService
         }
     }
 
-    private static void ValidateIdempotencyKey(string idempotencyKey)
+    private static string NormalizeIdempotencyKey(string idempotencyKey)
     {
-        if (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length is < 8 or > 128)
+        var normalized = idempotencyKey?.Trim() ?? string.Empty;
+        if (normalized.Length is < 8 or > 128)
         {
             throw new IdempotencyConflictException("Idempotency key length must be between 8 and 128 characters.");
         }
+
+        return normalized;
     }
 
     private static void ValidateCreateCommand(CreatePaymentCommand command)

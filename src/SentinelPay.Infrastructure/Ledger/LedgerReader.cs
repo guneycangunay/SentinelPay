@@ -19,7 +19,13 @@ public sealed class LedgerReader : ILedgerReader
         string currency,
         CancellationToken cancellationToken)
     {
-        var normalizedCurrency = currency.Trim().ToUpperInvariant();
+        var normalizedCurrency = currency?.Trim().ToUpperInvariant() ?? string.Empty;
+        if (normalizedCurrency.Length != 3 ||
+            normalizedCurrency.Any(character => !char.IsLetter(character)))
+        {
+            throw new ArgumentException("Currency must be a three-letter ISO 4217 code.");
+        }
+
         var rawBalances = await (
             from line in _dbContext.LedgerLines.AsNoTracking()
             join journal in _dbContext.LedgerJournals.AsNoTracking() on line.JournalId equals journal.Id

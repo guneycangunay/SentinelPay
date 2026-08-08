@@ -65,9 +65,14 @@ public sealed class Payment
         string requestHash,
         DateTimeOffset now)
     {
-        if (string.IsNullOrWhiteSpace(merchantReference))
+        var normalizedReference = merchantReference?.Trim() ?? string.Empty;
+        var normalizedCurrency = currency?.Trim().ToUpperInvariant() ?? string.Empty;
+        var normalizedProvider = provider?.Trim().ToLowerInvariant() ?? string.Empty;
+        var normalizedKey = idempotencyKey?.Trim() ?? string.Empty;
+
+        if (normalizedReference.Length is 0 or > 100)
         {
-            throw new DomainException("Merchant reference is required.");
+            throw new DomainException("Merchant reference is required and cannot exceed 100 characters.");
         }
 
         if (amountMinor <= 0)
@@ -75,20 +80,22 @@ public sealed class Payment
             throw new DomainException("Payment amount must be greater than zero.");
         }
 
-        if (currency.Length != 3 || currency.Any(character => !char.IsLetter(character)))
+        if (normalizedCurrency.Length != 3 || normalizedCurrency.Any(character => !char.IsLetter(character)))
         {
             throw new DomainException("Currency must be a three-letter ISO 4217 code.");
         }
 
-        if (string.IsNullOrWhiteSpace(provider))
+        if (normalizedProvider.Length is 0 or > 40)
         {
-            throw new DomainException("Payment provider is required.");
+            throw new DomainException("Payment provider is required and cannot exceed 40 characters.");
         }
 
-        if (string.IsNullOrWhiteSpace(idempotencyKey))
+        if (normalizedKey.Length is < 8 or > 128)
         {
-            throw new DomainException("Idempotency key is required.");
+            throw new DomainException("Idempotency key length must be between 8 and 128 characters.");
         }
+
+        EnsureRequestHash(requestHash);
 
         if (merchantId == Guid.Empty)
         {
@@ -98,11 +105,11 @@ public sealed class Payment
         return new Payment(
             Guid.NewGuid(),
             merchantId,
-            merchantReference.Trim(),
+            normalizedReference,
             amountMinor,
-            currency.ToUpperInvariant(),
-            provider.Trim().ToLowerInvariant(),
-            idempotencyKey.Trim(),
+            normalizedCurrency,
+            normalizedProvider,
+            normalizedKey,
             requestHash,
             now);
     }
@@ -113,13 +120,16 @@ public sealed class Payment
         string requestHash,
         DateTimeOffset now)
     {
-        if (string.IsNullOrWhiteSpace(idempotencyKey))
+        var normalizedKey = idempotencyKey?.Trim() ?? string.Empty;
+        if (normalizedKey.Length is < 8 or > 128)
         {
-            throw new DomainException("Operation idempotency key is required.");
+            throw new DomainException("Operation idempotency key length must be between 8 and 128 characters.");
         }
 
+        EnsureRequestHash(requestHash);
+
         if (_operations.Any(operation =>
-                operation.Type == type && operation.IdempotencyKey == idempotencyKey))
+                operation.Type == type && operation.IdempotencyKey == normalizedKey))
         {
             throw new DomainException("The payment operation already exists.");
         }
@@ -129,7 +139,7 @@ public sealed class Payment
             MerchantId,
             Id,
             type,
-            idempotencyKey.Trim(),
+            normalizedKey,
             requestHash,
             now);
         _operations.Add(operation);
@@ -152,8 +162,9 @@ public sealed class Payment
             throw new DomainException($"A payment in '{Status}' state cannot fail.");
         }
 
-        FailureCode = string.IsNullOrWhiteSpace(code) ? "provider_error" : code;
-        FailureMessage = message;
+        var normalizedCode = string.IsNullOrWhiteSpace(code) ? "provider_error" : code.Trim();
+        FailureCode = normalizedCode[..Math.Min(normalizedCode.Length, 80)];
+        FailureMessage = message[..Math.Min(message.Length, 500)];
         Status = PaymentStatus.Failed;
         UpdatedAt = now;
     }
@@ -183,17 +194,20 @@ public sealed class Payment
     {
         EnsureCanRefund(amountMinor);
 
-        if (string.IsNullOrWhiteSpace(idempotencyKey))
+        var normalizedKey = idempotencyKey?.Trim() ?? string.Empty;
+        if (normalizedKey.Length is < 8 or > 128)
         {
-            throw new DomainException("Refund idempotency key is required.");
+            throw new DomainException("Refund idempotency key length must be between 8 and 128 characters.");
         }
+
+        EnsureRequestHash(requestHash);
 
         var refund = new Refund(
             refundId,
             Id,
             amountMinor,
             RequireProviderReference(providerReference),
-            idempotencyKey.Trim(),
+            normalizedKey,
             requestHash,
             now);
         _refunds.Add(refund);
@@ -229,11 +243,20 @@ public sealed class Payment
 
     private static string RequireProviderReference(string providerReference)
     {
-        if (string.IsNullOrWhiteSpace(providerReference))
+        var normalized = providerReference?.Trim() ?? string.Empty;
+        if (normalized.Length is 0 or > 120)
         {
-            throw new DomainException("Provider reference is required.");
+            throw new DomainException("Provider reference is required and cannot exceed 120 characters.");
         }
 
-        return providerReference.Trim();
+        return normalized;
+    }
+
+    private static void EnsureRequestHash(string requestHash)
+    {
+        if (requestHash is null || requestHash.Length != 64 || requestHash.Any(character => !Uri.IsHexDigit(character)))
+        {
+            throw new DomainException("Request hash must be a 64-character hexadecimal SHA-256 digest.");
+        }
     }
 }

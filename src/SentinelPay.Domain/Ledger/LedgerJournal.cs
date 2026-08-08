@@ -45,14 +45,23 @@ public sealed class LedgerJournal
         DateTimeOffset now)
     {
         var drafts = lineDrafts.ToArray();
-        if (merchantId == Guid.Empty || string.IsNullOrWhiteSpace(externalReference))
+        var normalizedExternalReference = externalReference?.Trim() ?? string.Empty;
+        var normalizedCurrency = currency?.Trim().ToUpperInvariant() ?? string.Empty;
+        var normalizedDescription = description?.Trim() ?? string.Empty;
+        if (merchantId == Guid.Empty || normalizedExternalReference.Length is 0 or > 160)
         {
-            throw new DomainException("Ledger merchant and external reference are required.");
+            throw new DomainException("Ledger merchant and an external reference up to 160 characters are required.");
         }
 
-        if (currency.Length != 3)
+        if (normalizedCurrency.Length != 3 ||
+            normalizedCurrency.Any(character => !char.IsLetter(character)))
         {
             throw new DomainException("Ledger currency must be an ISO 4217 code.");
+        }
+
+        if (normalizedDescription.Length is 0 or > 240)
+        {
+            throw new DomainException("Ledger description is required and cannot exceed 240 characters.");
         }
 
         if (drafts.Length < 2 || drafts.Any(line => line.AmountMinor <= 0))
@@ -71,9 +80,9 @@ public sealed class LedgerJournal
             Guid.NewGuid(),
             merchantId,
             paymentId,
-            externalReference.Trim(),
-            currency.ToUpperInvariant(),
-            description.Trim(),
+            normalizedExternalReference,
+            normalizedCurrency,
+            normalizedDescription,
             now);
 
         foreach (var draft in drafts)

@@ -14,14 +14,17 @@ public sealed class ReconciliationWorker : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
     private readonly ILogger<ReconciliationWorker> _logger;
+    private readonly IClock _clock;
 
     public ReconciliationWorker(
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
+        IClock clock,
         ILogger<ReconciliationWorker> logger)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
+        _clock = clock;
         _logger = logger;
     }
 
@@ -49,7 +52,7 @@ public sealed class ReconciliationWorker : BackgroundService
 
     private async Task ReconcileBatchAsync(CancellationToken cancellationToken)
     {
-        var staleBefore = DateTimeOffset.UtcNow.AddMinutes(
+        var staleBefore = _clock.UtcNow.AddMinutes(
             -_configuration.GetValue("Reconciliation:StaleAfterMinutes", 2));
         Guid[] paymentIds;
         await using (var discoveryScope = _scopeFactory.CreateAsyncScope())
@@ -88,7 +91,7 @@ public sealed class ReconciliationWorker : BackgroundService
                 var external = await gateway.GetStatusAsync(
                     payment.ProviderReference ?? string.Empty,
                     cancellationToken);
-                var now = DateTimeOffset.UtcNow;
+                var now = _clock.UtcNow;
 
                 switch (external.State)
                 {
@@ -96,8 +99,8 @@ public sealed class ReconciliationWorker : BackgroundService
                     {
                         var captureOperation = payment.StartOperation(
                             PaymentOperationType.Reconcile,
-                            $"reconcile-captured:{payment.ProviderReference}",
-                            $"external-state:{GatewayPaymentState.Captured}",
+                            $"reconcile:{payment.Id:N}:captured",
+                            HashExternalState(GatewayPaymentState.Captured, null),
                             now);
                         payment.Capture(payment.AmountMinor, now);
                         captureOperation.Succeed(payment.ProviderReference, now);
@@ -113,8 +116,8 @@ public sealed class ReconciliationWorker : BackgroundService
                     {
                         var failureOperation = payment.StartOperation(
                             PaymentOperationType.Reconcile,
-                            $"reconcile-failed:{payment.ProviderReference}",
-                            $"external-state:{GatewayPaymentState.Failed}:{external.ErrorCode}",
+                            $"reconcile:{payment.Id:N}:failed",
+                            HashExternalState(GatewayPaymentState.Failed, external.ErrorCode),
                             now);
                         payment.MarkFailed(
                             external.ErrorCode ?? "reconciled_failure",
@@ -158,4 +161,8 @@ public sealed class ReconciliationWorker : BackgroundService
                 corrected);
         }
     }
+
+    private static string HashExternalState(GatewayPaymentState state, string? errorCode) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes($"{state}:{errorCode}")));
 }

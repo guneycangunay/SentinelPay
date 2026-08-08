@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 using SentinelPay.Application.Abstractions;
 using StackExchange.Redis;
 
@@ -8,10 +9,14 @@ public sealed class RedisDistributedLock : IDistributedLock
 {
     private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(75);
     private readonly IConnectionMultiplexer _connection;
+    private readonly ILogger<RedisDistributedLock> _logger;
 
-    public RedisDistributedLock(IConnectionMultiplexer connection)
+    public RedisDistributedLock(
+        IConnectionMultiplexer connection,
+        ILogger<RedisDistributedLock> logger)
     {
         _connection = connection;
+        _logger = logger;
     }
 
     public async Task<IAsyncDisposable> AcquireAsync(
@@ -24,15 +29,22 @@ public sealed class RedisDistributedLock : IDistributedLock
         var token = Guid.NewGuid().ToString("N");
         var stopwatch = Stopwatch.StartNew();
 
-        while (stopwatch.Elapsed < expiry)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (await database.StringSetAsync(key, token, expiry, When.NotExists))
+            while (stopwatch.Elapsed < expiry)
             {
-                return new Lease(database, key, token);
-            }
+                cancellationToken.ThrowIfCancellationRequested();
+                if (await database.StringSetAsync(key, token, expiry, When.NotExists))
+                {
+                    return new Lease(database, key, token, _logger);
+                }
 
-            await Task.Delay(RetryDelay, cancellationToken);
+                await Task.Delay(RetryDelay, cancellationToken);
+            }
+        }
+        catch (RedisException exception)
+        {
+            throw new DistributedLockUnavailableException(exception);
         }
 
         throw new TimeoutException($"Could not acquire distributed lock for '{resource}'.");
@@ -45,20 +57,31 @@ public sealed class RedisDistributedLock : IDistributedLock
         private readonly IDatabase _database;
         private readonly RedisKey _key;
         private readonly RedisValue _token;
+        private readonly ILogger _logger;
         private int _released;
 
-        public Lease(IDatabase database, RedisKey key, RedisValue token)
+        public Lease(IDatabase database, RedisKey key, RedisValue token, ILogger logger)
         {
             _database = database;
             _key = key;
             _token = token;
+            _logger = logger;
         }
 
         public async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref _released, 1) == 0)
             {
-                await _database.ScriptEvaluateAsync(ReleaseScript, [_key], [_token]);
+                try
+                {
+                    await _database.ScriptEvaluateAsync(ReleaseScript, [_key], [_token]);
+                }
+                catch (RedisException exception)
+                {
+                    _logger.LogWarning(
+                        exception,
+                        "Could not release a Redis lease; it will expire automatically.");
+                }
             }
         }
     }

@@ -77,18 +77,31 @@ public sealed class PaymentApiTests : IAsyncLifetime
     [Fact]
     public async Task Merchant_CannotReadAnotherMerchantsPayment()
     {
+        const string sharedIdempotencyKey = "create-tenant-isolation-0001";
         using var createMessage = CreatePost(
             "/api/v1/payments",
             CreateRequest("order-tenant-isolation-1"),
-            "create-tenant-isolation-0001");
+            sharedIdempotencyKey);
         using var createResponse = await Client.SendAsync(createMessage);
-        var paymentId = (await ReadJsonAsync(createResponse)).RootElement.GetProperty("id").GetGuid();
+        var firstJson = await ReadJsonAsync(createResponse);
+        var paymentId = firstJson.RootElement.GetProperty("id").GetGuid();
 
-        using var crossTenantRequest = new HttpRequestMessage(
-            HttpMethod.Get,
-            $"/api/v1/payments/{paymentId}");
-        crossTenantRequest.Headers.Add("X-Api-Key", SecondMerchantApiKey);
-        using var response = await Client.SendAsync(crossTenantRequest);
+        using var secondClient = _factory?.CreateClient()
+            ?? throw new InvalidOperationException("Test fixture is not initialized.");
+        secondClient.DefaultRequestHeaders.Add("X-Api-Key", SecondMerchantApiKey);
+        using var secondCreateMessage = CreatePost(
+            "/api/v1/payments",
+            CreateRequest("order-tenant-isolation-1"),
+            sharedIdempotencyKey);
+        using var secondCreateResponse = await secondClient.SendAsync(secondCreateMessage);
+        Assert.Equal(HttpStatusCode.Created, secondCreateResponse.StatusCode);
+        var secondJson = await ReadJsonAsync(secondCreateResponse);
+        Assert.NotEqual(paymentId, secondJson.RootElement.GetProperty("id").GetGuid());
+        Assert.NotEqual(
+            firstJson.RootElement.GetProperty("providerReference").GetString(),
+            secondJson.RootElement.GetProperty("providerReference").GetString());
+
+        using var response = await secondClient.GetAsync($"/api/v1/payments/{paymentId}");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
@@ -129,6 +142,13 @@ public sealed class PaymentApiTests : IAsyncLifetime
             "capture-lifecycle-0001");
         using var captureResponse = await Client.SendAsync(captureMessage);
         Assert.Equal(HttpStatusCode.OK, captureResponse.StatusCode);
+
+        using var invalidRefundMessage = CreatePost(
+            $"/api/v1/payments/{paymentId}/refunds",
+            new { amountMinor = 9_000 },
+            "refund-ledger-invalid-0001");
+        using var invalidRefundResponse = await Client.SendAsync(invalidRefundMessage);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, invalidRefundResponse.StatusCode);
 
         using var refundMessage = CreatePost(
             $"/api/v1/payments/{paymentId}/refunds",
@@ -262,12 +282,21 @@ public sealed class PaymentApiTests : IAsyncLifetime
             .GetInt64();
         Assert.True(payableBefore >= 6_000);
 
+        var settlementRequest = new { currency = "EUR", periodEnd = DateTimeOffset.UtcNow };
         using var settlementMessage = CreatePost(
             "/api/v1/settlements",
-            new { currency = "EUR", periodEnd = DateTimeOffset.UtcNow.AddMinutes(1) },
+            settlementRequest,
             "settle-ledger-0001");
         using var settlementResponse = await Client.SendAsync(settlementMessage);
         Assert.Equal(HttpStatusCode.Created, settlementResponse.StatusCode);
+
+        using var settlementReplayMessage = CreatePost(
+            "/api/v1/settlements",
+            settlementRequest,
+            "settle-ledger-0001");
+        using var settlementReplayResponse = await Client.SendAsync(settlementReplayMessage);
+        Assert.Equal(HttpStatusCode.OK, settlementReplayResponse.StatusCode);
+        Assert.True(settlementReplayResponse.Headers.Contains("Idempotent-Replay"));
 
         using var balancesAfter = await Client.GetAsync("/api/v1/ledger/balances?currency=EUR");
         var after = await ReadJsonAsync(balancesAfter);

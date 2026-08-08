@@ -1,5 +1,5 @@
-using System.Threading.RateLimiting;
 using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -94,7 +94,14 @@ if (app.Configuration.GetValue("Database:InitializeOnStartup", true))
     await initializer.InitializeAsync();
 }
 
-app.MapGet("/", () => Results.Redirect("/swagger"))
+app.MapGet("/", (IHostEnvironment environment) => Results.Ok(new
+    {
+        service = "SentinelPay.Api",
+        version = typeof(Program).Assembly.GetName().Version?.ToString(),
+        environment = environment.EnvironmentName,
+        health = "/health/ready",
+        documentation = environment.IsDevelopment() ? "/swagger" : null
+    }))
     .ExcludeFromDescription();
 app.MapGet("/health/live", () => Results.Ok(new { status = "healthy" }))
     .WithTags("Operations");
