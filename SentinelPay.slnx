@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SentinelPay.Api/SentinelPay.Api.csproj" />
+    <Project Path="src/SentinelPay.Application/SentinelPay.Application.csproj" />
+    <Project Path="src/SentinelPay.Domain/SentinelPay.Domain.csproj" />
+    <Project Path="src/SentinelPay.Infrastructure/SentinelPay.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SentinelPay.Domain.Tests/SentinelPay.Domain.Tests.csproj" />
+    <Project Path="tests/SentinelPay.IntegrationTests/SentinelPay.IntegrationTests.csproj" />
+  </Folder>
+</Solution>
