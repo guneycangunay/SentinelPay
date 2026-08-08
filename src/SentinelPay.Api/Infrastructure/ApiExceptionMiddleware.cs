@@ -4,7 +4,6 @@ using SentinelPay.Application.Abstractions;
 using SentinelPay.Application.Payments;
 using SentinelPay.Application.Settlements;
 using SentinelPay.Domain;
-using SentinelPay.Domain.Payments;
 
 namespace SentinelPay.Api.Infrastructure;
 
@@ -177,19 +176,27 @@ public sealed class ApiExceptionMiddleware
         DbUpdateConcurrencyException exception,
         CancellationToken cancellationToken)
     {
-        var entry = exception.Entries.SingleOrDefault(candidate => candidate.Entity is Payment);
-        if (entry is null)
+        var entries = new List<object>();
+        foreach (var entry in exception.Entries)
         {
-            return EmptyExtensions();
+            var databaseValues = await entry.GetDatabaseValuesAsync(cancellationToken);
+            var primaryKey = entry.Metadata.FindPrimaryKey();
+            entries.Add(new
+            {
+                entity = entry.Metadata.ClrType.Name,
+                state = entry.State.ToString(),
+                databaseExists = databaseValues is not null,
+                key = primaryKey is null
+                    ? null
+                    : string.Join(',', primaryKey.Properties.Select(property =>
+                        entry.CurrentValues[property]?.ToString()))
+            });
         }
 
-        var databaseValues = await entry.GetDatabaseValuesAsync(cancellationToken);
         return new Dictionary<string, object?>
         {
-            ["entity"] = nameof(Payment),
-            ["expectedVersion"] = entry.OriginalValues[nameof(Payment.Version)],
-            ["attemptedVersion"] = entry.CurrentValues[nameof(Payment.Version)],
-            ["databaseVersion"] = databaseValues?[nameof(Payment.Version)]
+            ["entryCount"] = exception.Entries.Count,
+            ["entries"] = entries
         };
     }
 
