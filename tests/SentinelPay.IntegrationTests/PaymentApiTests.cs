@@ -25,7 +25,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
 
     public async ValueTask InitializeAsync()
     {
-        await _postgres.StartAsync();
+        await _postgres.StartAsync(TestContext.Current.CancellationToken);
         _factory = new SentinelPayApiFactory(_postgres.GetConnectionString());
         _client = _factory.CreateClient();
         _client.DefaultRequestHeaders.Add("X-Api-Key", SentinelPayApiFactory.DevelopmentApiKey);
@@ -49,7 +49,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
         using var anonymousClient = _factory?.CreateClient()
             ?? throw new InvalidOperationException("Test fixture is not initialized.");
 
-        using var response = await anonymousClient.GetAsync("/api/v1/providers");
+        using var response = await anonymousClient.GetAsync("/api/v1/providers", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
@@ -61,8 +61,8 @@ public sealed class PaymentApiTests : IAsyncLifetime
         using var firstMessage = CreatePost("/api/v1/payments", request, "create-idempotent-0001");
         using var secondMessage = CreatePost("/api/v1/payments", request, "create-idempotent-0001");
 
-        using var first = await Client.SendAsync(firstMessage);
-        using var second = await Client.SendAsync(secondMessage);
+        using var first = await Client.SendAsync(firstMessage, TestContext.Current.CancellationToken);
+        using var second = await Client.SendAsync(secondMessage, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Created, first.StatusCode);
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
@@ -82,7 +82,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             "/api/v1/payments",
             CreateRequest("order-tenant-isolation-1"),
             sharedIdempotencyKey);
-        using var createResponse = await Client.SendAsync(createMessage);
+        using var createResponse = await Client.SendAsync(createMessage, TestContext.Current.CancellationToken);
         var firstJson = await ReadJsonAsync(createResponse);
         var paymentId = firstJson.RootElement.GetProperty("id").GetGuid();
 
@@ -93,7 +93,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             "/api/v1/payments",
             CreateRequest("order-tenant-isolation-1"),
             sharedIdempotencyKey);
-        using var secondCreateResponse = await secondClient.SendAsync(secondCreateMessage);
+        using var secondCreateResponse = await secondClient.SendAsync(secondCreateMessage, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.Created, secondCreateResponse.StatusCode);
         var secondJson = await ReadJsonAsync(secondCreateResponse);
         Assert.NotEqual(paymentId, secondJson.RootElement.GetProperty("id").GetGuid());
@@ -101,7 +101,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             firstJson.RootElement.GetProperty("providerReference").GetString(),
             secondJson.RootElement.GetProperty("providerReference").GetString());
 
-        using var response = await secondClient.GetAsync($"/api/v1/payments/{paymentId}");
+        using var response = await secondClient.GetAsync($"/api/v1/payments/{paymentId}", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
@@ -118,8 +118,8 @@ public sealed class PaymentApiTests : IAsyncLifetime
             CreateRequest("order-conflict", amountMinor: 20_00),
             "create-conflict-0001");
 
-        using var first = await Client.SendAsync(firstMessage);
-        using var second = await Client.SendAsync(secondMessage);
+        using var first = await Client.SendAsync(firstMessage, TestContext.Current.CancellationToken);
+        using var second = await Client.SendAsync(secondMessage, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Created, first.StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
@@ -132,7 +132,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             "/api/v1/payments",
             CreateRequest("order-lifecycle-1", amountMinor: 12_990),
             "create-lifecycle-0001");
-        using var createResponse = await Client.SendAsync(createMessage);
+        using var createResponse = await Client.SendAsync(createMessage, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
         var paymentId = (await ReadJsonAsync(createResponse)).RootElement.GetProperty("id").GetGuid();
 
@@ -140,21 +140,21 @@ public sealed class PaymentApiTests : IAsyncLifetime
             $"/api/v1/payments/{paymentId}/capture",
             new { amountMinor = 12_990 },
             "capture-lifecycle-0001");
-        using var captureResponse = await Client.SendAsync(captureMessage);
+        using var captureResponse = await Client.SendAsync(captureMessage, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.OK, captureResponse.StatusCode);
 
         using var invalidRefundMessage = CreatePost(
             $"/api/v1/payments/{paymentId}/refunds",
             new { amountMinor = 14_000 },
             "refund-ledger-invalid-0001");
-        using var invalidRefundResponse = await Client.SendAsync(invalidRefundMessage);
+        using var invalidRefundResponse = await Client.SendAsync(invalidRefundMessage, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, invalidRefundResponse.StatusCode);
 
         using var refundMessage = CreatePost(
             $"/api/v1/payments/{paymentId}/refunds",
             new { amountMinor = 2_990 },
             "refund-lifecycle-0001");
-        using var refundResponse = await Client.SendAsync(refundMessage);
+        using var refundResponse = await Client.SendAsync(refundMessage, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.OK, refundResponse.StatusCode);
         var refundJson = await ReadJsonAsync(refundResponse);
         Assert.Equal("PartiallyRefunded", refundJson.RootElement.GetProperty("status").GetString());
@@ -174,7 +174,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
         };
         using var message = CreatePost("/api/v1/payments", request, "create-declined-0001");
 
-        using var response = await Client.SendAsync(message);
+        using var response = await Client.SendAsync(message, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         var json = await ReadJsonAsync(response);
@@ -194,11 +194,11 @@ public sealed class PaymentApiTests : IAsyncLifetime
             paymentMethodToken = "tok_transient_once"
         };
         using var firstMessage = CreatePost("/api/v1/payments", request, "create-transient-0001");
-        using var first = await Client.SendAsync(firstMessage);
+        using var first = await Client.SendAsync(firstMessage, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.ServiceUnavailable, first.StatusCode);
 
         using var retryMessage = CreatePost("/api/v1/payments", request, "create-transient-0001");
-        using var retry = await Client.SendAsync(retryMessage);
+        using var retry = await Client.SendAsync(retryMessage, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Created, retry.StatusCode);
         var json = await ReadJsonAsync(retry);
@@ -214,7 +214,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             "/api/v1/payments",
             CreateRequest("order-webhook-1"),
             "create-webhook-0001");
-        using var createResponse = await Client.SendAsync(createMessage);
+        using var createResponse = await Client.SendAsync(createMessage, TestContext.Current.CancellationToken);
         var created = await ReadJsonAsync(createResponse);
         var paymentId = created.RootElement.GetProperty("id").GetGuid();
         var providerReference = created.RootElement.GetProperty("providerReference").GetString();
@@ -227,14 +227,14 @@ public sealed class PaymentApiTests : IAsyncLifetime
 
         using var firstMessage = CreateWebhookPost(payload);
         using var secondMessage = CreateWebhookPost(payload);
-        using var first = await Client.SendAsync(firstMessage);
-        using var second = await Client.SendAsync(secondMessage);
+        using var first = await Client.SendAsync(firstMessage, TestContext.Current.CancellationToken);
+        using var second = await Client.SendAsync(secondMessage, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
         Assert.True(second.Headers.Contains("Idempotent-Replay"));
 
-        using var paymentResponse = await Client.GetAsync($"/api/v1/payments/{paymentId}");
+        using var paymentResponse = await Client.GetAsync($"/api/v1/payments/{paymentId}", TestContext.Current.CancellationToken);
         var payment = await ReadJsonAsync(paymentResponse);
         Assert.Equal("Captured", payment.RootElement.GetProperty("status").GetString());
     }
@@ -245,7 +245,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
         const string payload = "{\"id\":\"evt_expired\",\"type\":\"payment.captured\",\"providerReference\":\"missing\"}";
         using var message = CreateWebhookPost(payload, DateTimeOffset.UtcNow.AddMinutes(-10));
 
-        using var response = await Client.SendAsync(message);
+        using var response = await Client.SendAsync(message, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
@@ -257,24 +257,24 @@ public sealed class PaymentApiTests : IAsyncLifetime
             "/api/v1/payments",
             CreateRequest("order-ledger-1", amountMinor: 8_000),
             "create-ledger-0001");
-        using var createResponse = await Client.SendAsync(createMessage);
+        using var createResponse = await Client.SendAsync(createMessage, TestContext.Current.CancellationToken);
         var paymentId = (await ReadJsonAsync(createResponse)).RootElement.GetProperty("id").GetGuid();
 
         using var captureMessage = CreatePost(
             $"/api/v1/payments/{paymentId}/capture",
             new { amountMinor = 8_000 },
             "capture-ledger-0001");
-        using var captureResponse = await Client.SendAsync(captureMessage);
+        using var captureResponse = await Client.SendAsync(captureMessage, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.OK, captureResponse.StatusCode);
 
         using var refundMessage = CreatePost(
             $"/api/v1/payments/{paymentId}/refunds",
             new { amountMinor = 2_000 },
             "refund-ledger-0001");
-        using var refundResponse = await Client.SendAsync(refundMessage);
+        using var refundResponse = await Client.SendAsync(refundMessage, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.OK, refundResponse.StatusCode);
 
-        using var balancesBefore = await Client.GetAsync("/api/v1/ledger/balances?currency=EUR");
+        using var balancesBefore = await Client.GetAsync("/api/v1/ledger/balances?currency=EUR", TestContext.Current.CancellationToken);
         var before = await ReadJsonAsync(balancesBefore);
         var payableBefore = before.RootElement.EnumerateArray()
             .Single(item => item.GetProperty("account").GetString() == "MerchantPayable")
@@ -287,18 +287,18 @@ public sealed class PaymentApiTests : IAsyncLifetime
             "/api/v1/settlements",
             settlementRequest,
             "settle-ledger-0001");
-        using var settlementResponse = await Client.SendAsync(settlementMessage);
+        using var settlementResponse = await Client.SendAsync(settlementMessage, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.Created, settlementResponse.StatusCode);
 
         using var settlementReplayMessage = CreatePost(
             "/api/v1/settlements",
             settlementRequest,
             "settle-ledger-0001");
-        using var settlementReplayResponse = await Client.SendAsync(settlementReplayMessage);
+        using var settlementReplayResponse = await Client.SendAsync(settlementReplayMessage, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.OK, settlementReplayResponse.StatusCode);
         Assert.True(settlementReplayResponse.Headers.Contains("Idempotent-Replay"));
 
-        using var balancesAfter = await Client.GetAsync("/api/v1/ledger/balances?currency=EUR");
+        using var balancesAfter = await Client.GetAsync("/api/v1/ledger/balances?currency=EUR", TestContext.Current.CancellationToken);
         var after = await ReadJsonAsync(balancesAfter);
         var payableAfter = after.RootElement.EnumerateArray()
             .Single(item => item.GetProperty("account").GetString() == "MerchantPayable")
@@ -324,7 +324,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             paymentMethodToken = "tok_3ds_challenge"
         };
         using var createMessage = CreatePost("/api/v1/payments", request, "create-3ds-0001");
-        using var createResponse = await Client.SendAsync(createMessage);
+        using var createResponse = await Client.SendAsync(createMessage, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
         var created = await ReadJsonAsync(createResponse);
         Assert.Equal("RequiresAction", created.RootElement.GetProperty("status").GetString());
@@ -335,7 +335,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             $"/api/v1/payments/{paymentId}/confirm",
             new { authenticationResultToken = "auth_success" },
             "confirm-3ds-0001");
-        using var confirmResponse = await Client.SendAsync(confirmMessage);
+        using var confirmResponse = await Client.SendAsync(confirmMessage, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.OK, confirmResponse.StatusCode);
         var confirmed = await ReadJsonAsync(confirmResponse);
         Assert.Equal("Authorized", confirmed.RootElement.GetProperty("status").GetString());
@@ -345,7 +345,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             $"/api/v1/payments/{paymentId}/confirm",
             new { authenticationResultToken = "auth_success" },
             "confirm-3ds-0001");
-        using var replayResponse = await Client.SendAsync(replayMessage);
+        using var replayResponse = await Client.SendAsync(replayMessage, TestContext.Current.CancellationToken);
         Assert.True(replayResponse.Headers.Contains("Idempotent-Replay"));
     }
 
@@ -356,21 +356,21 @@ public sealed class PaymentApiTests : IAsyncLifetime
             "/api/v1/payments",
             CreateRequest("order-multi-capture-1", amountMinor: 10_000),
             "create-multi-capture-0001");
-        using var createResponse = await Client.SendAsync(createMessage);
+        using var createResponse = await Client.SendAsync(createMessage, TestContext.Current.CancellationToken);
         var paymentId = (await ReadJsonAsync(createResponse)).RootElement.GetProperty("id").GetGuid();
 
         using var firstCapture = CreatePost(
             $"/api/v1/payments/{paymentId}/capture",
             new { amountMinor = 4_000 },
             "capture-multi-0001");
-        using var firstResponse = await Client.SendAsync(firstCapture);
+        using var firstResponse = await Client.SendAsync(firstCapture, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
 
         using var secondCapture = CreatePost(
             $"/api/v1/payments/{paymentId}/capture",
             new { amountMinor = 3_500 },
             "capture-multi-0002");
-        using var secondResponse = await Client.SendAsync(secondCapture);
+        using var secondResponse = await Client.SendAsync(secondCapture, TestContext.Current.CancellationToken);
         var partial = await ReadJsonAsync(secondResponse);
         Assert.Equal("PartiallyCaptured", partial.RootElement.GetProperty("status").GetString());
         Assert.Equal(2_500, partial.RootElement.GetProperty("remainingAuthorizedAmountMinor").GetInt64());
@@ -380,14 +380,14 @@ public sealed class PaymentApiTests : IAsyncLifetime
             $"/api/v1/payments/{paymentId}/capture",
             new { amountMinor = 2_501 },
             "capture-multi-invalid-0001");
-        using var excessiveResponse = await Client.SendAsync(excessiveCapture);
+        using var excessiveResponse = await Client.SendAsync(excessiveCapture, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, excessiveResponse.StatusCode);
 
         using var voidMessage = CreatePost(
             $"/api/v1/payments/{paymentId}/void",
             body: null,
             "void-multi-0001");
-        using var voidResponse = await Client.SendAsync(voidMessage);
+        using var voidResponse = await Client.SendAsync(voidMessage, TestContext.Current.CancellationToken);
         var voided = await ReadJsonAsync(voidResponse);
         Assert.Equal("PartiallyCapturedAndVoided", voided.RootElement.GetProperty("status").GetString());
         Assert.Equal(2_500, voided.RootElement.GetProperty("voidedAmountMinor").GetInt64());
@@ -400,7 +400,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
             "/api/v1/payments",
             CreateRequest("order-reconciliation-import-1", amountMinor: 6_000),
             "create-recon-import-0001");
-        using var createResponse = await Client.SendAsync(createMessage);
+        using var createResponse = await Client.SendAsync(createMessage, TestContext.Current.CancellationToken);
         var created = await ReadJsonAsync(createResponse);
         var providerReference = created.RootElement.GetProperty("providerReference").GetString();
         var periodStart = DateTimeOffset.UtcNow.AddHours(-1);
@@ -415,7 +415,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
         };
         request.Headers.Add("X-Report-Name", "mock-bank-20260808.csv");
 
-        using var response = await Client.SendAsync(request);
+        using var response = await Client.SendAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         var report = await ReadJsonAsync(response);
@@ -467,7 +467,7 @@ public sealed class PaymentApiTests : IAsyncLifetime
 
     private async Task<JsonElement[]> GetJournalsAsync()
     {
-        using var response = await Client.GetAsync("/api/v1/ledger/journals?limit=100");
+        using var response = await Client.GetAsync("/api/v1/ledger/journals?limit=100", TestContext.Current.CancellationToken);
         var json = await ReadJsonAsync(response);
         return json.RootElement.EnumerateArray().Select(item => item.Clone()).ToArray();
     }
@@ -478,7 +478,8 @@ public sealed class PaymentApiTests : IAsyncLifetime
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<SentinelPayDbContext>();
         await dbContext.Merchants.AddAsync(
-            Merchant.Create(SecondMerchantId, "Second Merchant", DateTimeOffset.UtcNow));
+            Merchant.Create(SecondMerchantId, "Second Merchant", DateTimeOffset.UtcNow),
+            TestContext.Current.CancellationToken);
         await dbContext.ApiKeyCredentials.AddAsync(new ApiKeyCredential
         {
             Id = Guid.NewGuid(),
@@ -487,10 +488,10 @@ public sealed class PaymentApiTests : IAsyncLifetime
             KeyHash = ApiKeyHasher.Hash(SecondMerchantApiKey),
             Scopes = "payments:read payments:write ledger:read settlements:read settlements:write reconciliation:write",
             CreatedAt = DateTimeOffset.UtcNow
-        });
-        await dbContext.SaveChangesAsync();
+        }, TestContext.Current.CancellationToken);
+        await dbContext.SaveChangesAsync(TestContext.Current.CancellationToken);
     }
 
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response) =>
-        JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        JsonDocument.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
 }

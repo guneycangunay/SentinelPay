@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using SentinelPay.Application.Abstractions;
+using SentinelPay.Infrastructure;
 using SentinelPay.Infrastructure.Payments;
 
 namespace SentinelPay.IntegrationTests;
@@ -38,7 +39,7 @@ public sealed class ProviderHttpGatewayContractTests
                 "EUR",
                 "tok_http_rate_limited",
                 "provider-contract-0001"),
-            CancellationToken.None);
+            TestContext.Current.CancellationToken);
 
         Assert.Equal(GatewayAuthorizationState.Authorized, result.State);
         Assert.Equal("auth_http_123", result.ProviderReference);
@@ -77,7 +78,7 @@ public sealed class ProviderHttpGatewayContractTests
                 "EUR",
                 "tok_provider_only_abc",
                 "provider-contract-3ds-0001"),
-            CancellationToken.None);
+            TestContext.Current.CancellationToken);
 
         Assert.Equal(GatewayAuthorizationState.RequiresAction, result.State);
         Assert.Equal("redirect", result.NextAction?.Type);
@@ -103,7 +104,7 @@ public sealed class ProviderHttpGatewayContractTests
                 "auth_http_123",
                 8_000,
                 "provider-capture-0001"),
-            CancellationToken.None);
+            TestContext.Current.CancellationToken);
 
         Assert.False(result.IsSuccessful);
         Assert.Equal("capture_amount_invalid", result.ErrorCode);
@@ -128,12 +129,12 @@ public sealed class ProviderHttpGatewayContractTests
         for (var failure = 0; failure < 5; failure++)
         {
             await Assert.ThrowsAsync<HttpRequestException>(() =>
-                gateway.AuthorizeAsync(request, CancellationToken.None));
+                gateway.AuthorizeAsync(request, TestContext.Current.CancellationToken));
         }
 
         var attemptsBeforeOpenCall = handler.AttemptCount;
         var exception = await Assert.ThrowsAsync<HttpRequestException>(() =>
-            gateway.AuthorizeAsync(request, CancellationToken.None));
+            gateway.AuthorizeAsync(request, TestContext.Current.CancellationToken));
 
         Assert.Contains("circuit is open", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(attemptsBeforeOpenCall, handler.AttemptCount);
