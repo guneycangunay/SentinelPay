@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using SentinelPay.Application.Payments;
 using SentinelPay.Domain;
+using SentinelPay.Application.Settlements;
 
 namespace SentinelPay.Api.Infrastructure;
 
@@ -56,6 +57,12 @@ public sealed class ApiExceptionMiddleware
                 "Payment provider rejected the operation",
                 providerException.Message,
                 new Dictionary<string, object?> { ["providerCode"] = providerException.Code }),
+            PaymentProviderUnavailableException => (
+                StatusCodes.Status503ServiceUnavailable,
+                "https://sentinelpay.dev/problems/provider-unavailable",
+                "Payment provider unavailable",
+                exception.Message,
+                new Dictionary<string, object?> { ["retryable"] = true }),
             InvalidWebhookSignatureException => (
                 StatusCodes.Status401Unauthorized,
                 "https://sentinelpay.dev/problems/invalid-webhook-signature",
@@ -72,6 +79,30 @@ public sealed class ApiExceptionMiddleware
                 StatusCodes.Status422UnprocessableEntity,
                 "https://sentinelpay.dev/problems/domain-rule-violation",
                 "Payment operation is not valid",
+                exception.Message,
+                EmptyExtensions()),
+            NoPayableBalanceException => (
+                StatusCodes.Status409Conflict,
+                "https://sentinelpay.dev/problems/no-payable-balance",
+                "No payable balance",
+                exception.Message,
+                EmptyExtensions()),
+            UnauthorizedAccessException => (
+                StatusCodes.Status401Unauthorized,
+                "https://sentinelpay.dev/problems/unauthorized",
+                "Unauthorized",
+                "Valid merchant credentials are required.",
+                EmptyExtensions()),
+            KeyNotFoundException => (
+                StatusCodes.Status404NotFound,
+                "https://sentinelpay.dev/problems/resource-not-found",
+                "Resource not found",
+                exception.Message,
+                EmptyExtensions()),
+            ArgumentException => (
+                StatusCodes.Status422UnprocessableEntity,
+                "https://sentinelpay.dev/problems/invalid-request",
+                "Invalid request",
                 exception.Message,
                 EmptyExtensions()),
             TimeoutException => (

@@ -4,9 +4,12 @@ using Microsoft.Extensions.DependencyInjection;
 using SentinelPay.Application.Abstractions;
 using SentinelPay.Application.Payments;
 using SentinelPay.Infrastructure.Locking;
+using SentinelPay.Infrastructure.Ledger;
 using SentinelPay.Infrastructure.Outbox;
 using SentinelPay.Infrastructure.Payments;
 using SentinelPay.Infrastructure.Persistence;
+using SentinelPay.Infrastructure.Settlements;
+using SentinelPay.Application.Settlements;
 using StackExchange.Redis;
 
 namespace SentinelPay.Infrastructure;
@@ -26,15 +29,23 @@ public static class DependencyInjection
                 npgsql => npgsql.EnableRetryOnFailure(3, TimeSpan.FromSeconds(2), null)));
 
         services.AddScoped<IPaymentStore, PaymentStore>();
+        services.AddScoped<ILedgerWriter, LedgerWriter>();
+        services.AddScoped<ILedgerReader, LedgerReader>();
+        services.AddScoped<ISettlementStore, SettlementStore>();
         services.AddScoped<IWebhookInbox, WebhookInbox>();
         services.AddScoped<IOutboxWriter, EfOutboxWriter>();
         services.AddScoped<PaymentService>();
+        services.AddScoped<SettlementService>();
         services.AddScoped<WebhookService>();
+        services.AddScoped<DatabaseInitializer>();
         services.AddSingleton<IWebhookSignatureVerifier, HmacWebhookSignatureVerifier>();
         services.AddSingleton<IClock, SystemClock>();
 
         services.AddSingleton<IPaymentGateway, MockBankGateway>();
         services.AddSingleton<IPaymentGateway, SandboxWalletGateway>();
+        services.AddSingleton<SandboxGatewayStateStore>();
+        services.AddSingleton<ISandboxGatewayControl>(provider =>
+            provider.GetRequiredService<SandboxGatewayStateStore>());
         services.AddSingleton<IPaymentGatewayResolver, PaymentGatewayResolver>();
 
         if (configuration.GetValue("Redis:Enabled", true))
@@ -52,7 +63,14 @@ public static class DependencyInjection
             services.AddSingleton<IDistributedLock, InProcessDistributedLock>();
         }
 
-        services.AddScoped<IEventPublisher, LoggingEventPublisher>();
+        if (configuration["Messaging:Provider"]?.Equals("RabbitMq", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            services.AddSingleton<IEventPublisher, RabbitMqEventPublisher>();
+        }
+        else
+        {
+            services.AddSingleton<IEventPublisher, LoggingEventPublisher>();
+        }
         if (configuration.GetValue("Outbox:DispatcherEnabled", true))
         {
             services.AddHostedService<OutboxDispatcher>();

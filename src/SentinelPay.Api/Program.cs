@@ -1,11 +1,12 @@
 using System.Threading.RateLimiting;
 using System.Text.Json.Serialization;
-using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Authentication;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using SentinelPay.Api.Endpoints;
 using SentinelPay.Api.Infrastructure;
+using SentinelPay.Api.Security;
 using SentinelPay.Infrastructure;
 using SentinelPay.Infrastructure.Persistence;
 
@@ -19,13 +20,26 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services
+    .AddAuthentication(ApiKeyAuthenticationDefaults.Scheme)
+    .AddScheme<AuthenticationSchemeOptions, MerchantApiKeyAuthenticationHandler>(
+        ApiKeyAuthenticationDefaults.Scheme,
+        _ => { });
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy(SentinelPayPolicies.PaymentsRead, policy => policy.RequireClaim("scope", SentinelPayPolicies.PaymentsRead))
+    .AddPolicy(SentinelPayPolicies.PaymentsWrite, policy => policy.RequireClaim("scope", SentinelPayPolicies.PaymentsWrite))
+    .AddPolicy(SentinelPayPolicies.LedgerRead, policy => policy.RequireClaim("scope", SentinelPayPolicies.LedgerRead))
+    .AddPolicy(SentinelPayPolicies.SettlementsRead, policy => policy.RequireClaim("scope", SentinelPayPolicies.SettlementsRead))
+    .AddPolicy(SentinelPayPolicies.SettlementsWrite, policy => policy.RequireClaim("scope", SentinelPayPolicies.SettlementsWrite));
 
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
         RateLimitPartition.GetFixedWindowLimiter(
-            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            context.User.FindFirst(ApiKeyAuthenticationDefaults.MerchantIdClaim)?.Value ??
+            context.Connection.RemoteIpAddress?.ToString() ??
+            "unknown",
             _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = 120,
@@ -41,6 +55,7 @@ builder.Services.AddOpenTelemetry()
         serviceVersion: typeof(Program).Assembly.GetName().Version?.ToString() ?? "1.0.0"))
     .WithTracing(tracing =>
     {
+        tracing.AddSource(PaymentTelemetry.ActivitySourceName);
         tracing.AddAspNetCoreInstrumentation();
         tracing.AddHttpClientInstrumentation();
         if (!string.IsNullOrWhiteSpace(builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"]))
@@ -50,6 +65,7 @@ builder.Services.AddOpenTelemetry()
     })
     .WithMetrics(metrics =>
     {
+        metrics.AddMeter(PaymentTelemetry.MeterName, "SentinelPay.Outbox");
         metrics.AddAspNetCoreInstrumentation();
         metrics.AddHttpClientInstrumentation();
         metrics.AddRuntimeInstrumentation();
@@ -61,6 +77,8 @@ builder.Services.AddSentinelPayInfrastructure(builder.Configuration);
 var app = builder.Build();
 
 app.UseMiddleware<ApiExceptionMiddleware>();
+app.UseAuthentication();
+app.UseAuthorization();
 app.UseRateLimiter();
 
 if (app.Environment.IsDevelopment())
@@ -72,8 +90,8 @@ if (app.Environment.IsDevelopment())
 if (app.Configuration.GetValue("Database:InitializeOnStartup", true))
 {
     await using var scope = app.Services.CreateAsyncScope();
-    var dbContext = scope.ServiceProvider.GetRequiredService<SentinelPayDbContext>();
-    await dbContext.Database.EnsureCreatedAsync();
+    var initializer = scope.ServiceProvider.GetRequiredService<DatabaseInitializer>();
+    await initializer.InitializeAsync();
 }
 
 app.MapGet("/", () => Results.Redirect("/swagger"))
@@ -87,6 +105,11 @@ app.MapGet("/health/ready", async (SentinelPayDbContext dbContext, CancellationT
     .WithTags("Operations");
 app.MapPrometheusScrapingEndpoint("/metrics");
 app.MapPaymentEndpoints();
+app.MapFinanceEndpoints();
+if (app.Environment.IsDevelopment())
+{
+    app.MapDevelopmentEndpoints();
+}
 
 await app.RunAsync();
 

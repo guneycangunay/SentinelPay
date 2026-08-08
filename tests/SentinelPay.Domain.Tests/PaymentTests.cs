@@ -5,6 +5,7 @@ namespace SentinelPay.Domain.Tests;
 
 public sealed class PaymentTests
 {
+    private static readonly Guid MerchantId = Guid.Parse("2dc5f437-0a11-4c67-a810-b3e784470f73");
     private static readonly DateTimeOffset Now = new(2026, 8, 8, 9, 0, 0, TimeSpan.Zero);
 
     [Fact]
@@ -78,6 +79,7 @@ public sealed class PaymentTests
         string currency = "EUR",
         string provider = "mock-bank") =>
         Payment.Create(
+            MerchantId,
             "order-0001",
             amountMinor,
             currency,

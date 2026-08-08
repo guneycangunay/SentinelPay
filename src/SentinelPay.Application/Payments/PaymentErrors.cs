@@ -33,6 +33,14 @@ public sealed class PaymentProviderException : Exception
     public string Code { get; }
 }
 
+public sealed class PaymentProviderUnavailableException : Exception
+{
+    public PaymentProviderUnavailableException(Exception innerException)
+        : base("The payment provider is temporarily unavailable. Retry with the same idempotency key.", innerException)
+    {
+    }
+}
+
 public sealed class InvalidWebhookSignatureException : Exception
 {
     public InvalidWebhookSignatureException() : base("The webhook signature is invalid.")

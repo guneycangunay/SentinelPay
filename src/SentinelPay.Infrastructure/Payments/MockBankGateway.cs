@@ -4,6 +4,13 @@ namespace SentinelPay.Infrastructure.Payments;
 
 public sealed class MockBankGateway : IPaymentGateway
 {
+    private readonly SandboxGatewayStateStore _stateStore;
+
+    public MockBankGateway(SandboxGatewayStateStore stateStore)
+    {
+        _stateStore = stateStore;
+    }
+
     public string Name => "mock-bank";
 
     public async Task<GatewayAuthorizationResult> AuthorizeAsync(
@@ -12,7 +19,18 @@ public sealed class MockBankGateway : IPaymentGateway
     {
         await Task.Delay(TimeSpan.FromMilliseconds(60), cancellationToken);
 
-        return request.PaymentMethodToken.ToLowerInvariant() switch
+        if (request.PaymentMethodToken.Equals("tok_transient_once", StringComparison.OrdinalIgnoreCase) &&
+            _stateStore.ShouldFailOnce(request.IdempotencyKey))
+        {
+            throw new HttpRequestException("Simulated transient provider connection failure.");
+        }
+
+        if (request.PaymentMethodToken.Equals("tok_timeout", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new TimeoutException("Simulated provider timeout after operation persistence.");
+        }
+
+        var result = request.PaymentMethodToken.ToLowerInvariant() switch
         {
             "tok_declined" => new(false, null, "card_declined", "The issuing bank declined the payment."),
             "tok_insufficient_funds" => new(false, null, "insufficient_funds", "The card has insufficient funds."),
@@ -22,6 +40,12 @@ public sealed class MockBankGateway : IPaymentGateway
                 null,
                 null)
         };
+        if (result.IsSuccessful && result.ProviderReference is not null)
+        {
+            _stateStore.SetState(result.ProviderReference, GatewayPaymentState.Authorized);
+        }
+
+        return result;
     }
 
     public async Task<GatewayOperationResult> CaptureAsync(
@@ -29,6 +53,7 @@ public sealed class MockBankGateway : IPaymentGateway
         CancellationToken cancellationToken)
     {
         await Task.Delay(TimeSpan.FromMilliseconds(40), cancellationToken);
+        _stateStore.SetState(request.ProviderReference, GatewayPaymentState.Captured);
         return new GatewayOperationResult(true, null, null);
     }
 
@@ -47,5 +72,5 @@ public sealed class MockBankGateway : IPaymentGateway
     public Task<GatewayPaymentStatusResult> GetStatusAsync(
         string providerReference,
         CancellationToken cancellationToken) =>
-        Task.FromResult(new GatewayPaymentStatusResult(GatewayPaymentState.Authorized, null, null));
+        Task.FromResult(_stateStore.GetState(providerReference));
 }

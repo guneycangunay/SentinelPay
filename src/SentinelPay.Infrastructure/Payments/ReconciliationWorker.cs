@@ -49,62 +49,113 @@ public sealed class ReconciliationWorker : BackgroundService
 
     private async Task ReconcileBatchAsync(CancellationToken cancellationToken)
     {
-        await using var scope = _scopeFactory.CreateAsyncScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<SentinelPayDbContext>();
-        var resolver = scope.ServiceProvider.GetRequiredService<IPaymentGatewayResolver>();
-        var outbox = scope.ServiceProvider.GetRequiredService<IOutboxWriter>();
         var staleBefore = DateTimeOffset.UtcNow.AddMinutes(
             -_configuration.GetValue("Reconciliation:StaleAfterMinutes", 2));
-
-        var payments = await dbContext.Payments
-            .Where(payment => payment.Status == PaymentStatus.Authorized && payment.UpdatedAt <= staleBefore)
-            .OrderBy(payment => payment.UpdatedAt)
-            .Take(_configuration.GetValue("Reconciliation:BatchSize", 50))
-            .ToListAsync(cancellationToken);
-
-        foreach (var payment in payments)
+        Guid[] paymentIds;
+        await using (var discoveryScope = _scopeFactory.CreateAsyncScope())
         {
-            var gateway = resolver.Resolve(payment.Provider);
-            var external = await gateway.GetStatusAsync(
-                payment.ProviderReference ?? string.Empty,
-                cancellationToken);
+            var discoveryDb = discoveryScope.ServiceProvider.GetRequiredService<SentinelPayDbContext>();
+            paymentIds = await discoveryDb.Payments
+                .AsNoTracking()
+                .Where(payment => payment.Status == PaymentStatus.Authorized && payment.UpdatedAt <= staleBefore)
+                .OrderBy(payment => payment.UpdatedAt)
+                .Select(payment => payment.Id)
+                .Take(_configuration.GetValue("Reconciliation:BatchSize", 50))
+                .ToArrayAsync(cancellationToken);
+        }
 
-            switch (external.State)
+        var corrected = 0;
+        foreach (var paymentId in paymentIds)
+        {
+            try
             {
-                case GatewayPaymentState.Captured:
-                    payment.Capture(payment.AmountMinor, DateTimeOffset.UtcNow);
-                    outbox.Add(
-                        "payment.reconciled-captured.v1",
-                        payment.Id,
-                        new { payment.Id, payment.ProviderReference },
-                        DateTimeOffset.UtcNow);
-                    break;
-                case GatewayPaymentState.Failed:
-                    payment.MarkFailed(
-                        external.ErrorCode ?? "reconciled_failure",
-                        external.ErrorMessage ?? "The provider reported a failed payment during reconciliation.",
-                        DateTimeOffset.UtcNow);
-                    outbox.Add(
-                        "payment.reconciled-failed.v1",
-                        payment.Id,
-                        new { payment.Id, payment.FailureCode },
-                        DateTimeOffset.UtcNow);
-                    break;
-                case GatewayPaymentState.Authorized:
-                case GatewayPaymentState.Unknown:
-                default:
-                    break;
+                await using var scope = _scopeFactory.CreateAsyncScope();
+                var dbContext = scope.ServiceProvider.GetRequiredService<SentinelPayDbContext>();
+                var resolver = scope.ServiceProvider.GetRequiredService<IPaymentGatewayResolver>();
+                var outbox = scope.ServiceProvider.GetRequiredService<IOutboxWriter>();
+                var ledger = scope.ServiceProvider.GetRequiredService<ILedgerWriter>();
+                var payment = await dbContext.Payments
+                    .Include(item => item.Operations)
+                    .SingleOrDefaultAsync(
+                        item => item.Id == paymentId && item.Status == PaymentStatus.Authorized,
+                        cancellationToken);
+                if (payment is null)
+                {
+                    continue;
+                }
+
+                var gateway = resolver.Resolve(payment.Provider);
+                var external = await gateway.GetStatusAsync(
+                    payment.ProviderReference ?? string.Empty,
+                    cancellationToken);
+                var now = DateTimeOffset.UtcNow;
+
+                switch (external.State)
+                {
+                    case GatewayPaymentState.Captured:
+                    {
+                        var captureOperation = payment.StartOperation(
+                            PaymentOperationType.Reconcile,
+                            $"reconcile-captured:{payment.ProviderReference}",
+                            $"external-state:{GatewayPaymentState.Captured}",
+                            now);
+                        payment.Capture(payment.AmountMinor, now);
+                        captureOperation.Succeed(payment.ProviderReference, now);
+                        await ledger.RecordCaptureAsync(payment, now, cancellationToken);
+                        outbox.Add(
+                            "payment.reconciled-captured.v2",
+                            payment.Id,
+                            new { payment.Id, payment.MerchantId, payment.ProviderReference },
+                            now);
+                        break;
+                    }
+                    case GatewayPaymentState.Failed:
+                    {
+                        var failureOperation = payment.StartOperation(
+                            PaymentOperationType.Reconcile,
+                            $"reconcile-failed:{payment.ProviderReference}",
+                            $"external-state:{GatewayPaymentState.Failed}:{external.ErrorCode}",
+                            now);
+                        payment.MarkFailed(
+                            external.ErrorCode ?? "reconciled_failure",
+                            external.ErrorMessage ?? "The provider reported a failed payment during reconciliation.",
+                            now);
+                        failureOperation.Succeed(payment.ProviderReference, now);
+                        outbox.Add(
+                            "payment.reconciled-failed.v2",
+                            payment.Id,
+                            new { payment.Id, payment.MerchantId, payment.FailureCode },
+                            now);
+                        break;
+                    }
+                    case GatewayPaymentState.Authorized:
+                    case GatewayPaymentState.Unknown:
+                    default:
+                        continue;
+                }
+
+                await dbContext.SaveChangesAsync(cancellationToken);
+                corrected++;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(
+                    exception,
+                    "Reconciliation skipped payment {PaymentId}; the remaining batch will continue.",
+                    paymentId);
             }
         }
 
-        if (dbContext.ChangeTracker.HasChanges())
+        if (paymentIds.Length > 0)
         {
-            await dbContext.SaveChangesAsync(cancellationToken);
-        }
-
-        if (payments.Count > 0)
-        {
-            _logger.LogInformation("Reconciled {PaymentCount} stale authorized payments.", payments.Count);
+            _logger.LogInformation(
+                "Inspected {PaymentCount} stale authorizations and corrected {CorrectedCount}.",
+                paymentIds.Length,
+                corrected);
         }
     }
 }

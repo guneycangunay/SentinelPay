@@ -13,15 +13,24 @@ public sealed class PaymentStore : IPaymentStore
         _dbContext = dbContext;
     }
 
-    public Task<Payment?> GetAsync(Guid paymentId, CancellationToken cancellationToken) =>
+    public Task<Payment?> GetAsync(Guid merchantId, Guid paymentId, CancellationToken cancellationToken) =>
         _dbContext.Payments
             .Include(payment => payment.Refunds)
-            .SingleOrDefaultAsync(payment => payment.Id == paymentId, cancellationToken);
+            .Include(payment => payment.Operations)
+            .SingleOrDefaultAsync(
+                payment => payment.MerchantId == merchantId && payment.Id == paymentId,
+                cancellationToken);
 
-    public Task<Payment?> GetByIdempotencyKeyAsync(string idempotencyKey, CancellationToken cancellationToken) =>
+    public Task<Payment?> GetByIdempotencyKeyAsync(
+        Guid merchantId,
+        string idempotencyKey,
+        CancellationToken cancellationToken) =>
         _dbContext.Payments
             .Include(payment => payment.Refunds)
-            .SingleOrDefaultAsync(payment => payment.IdempotencyKey == idempotencyKey, cancellationToken);
+            .Include(payment => payment.Operations)
+            .SingleOrDefaultAsync(
+                payment => payment.MerchantId == merchantId && payment.IdempotencyKey == idempotencyKey,
+                cancellationToken);
 
     public Task<Payment?> GetByProviderReferenceAsync(
         string provider,
@@ -29,6 +38,7 @@ public sealed class PaymentStore : IPaymentStore
         CancellationToken cancellationToken) =>
         _dbContext.Payments
             .Include(payment => payment.Refunds)
+            .Include(payment => payment.Operations)
             .SingleOrDefaultAsync(
                 payment => payment.Provider == provider && payment.ProviderReference == providerReference,
                 cancellationToken);

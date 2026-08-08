@@ -14,6 +14,7 @@ public sealed class WebhookService
     private readonly IWebhookSignatureVerifier _signatureVerifier;
     private readonly IPaymentGatewayResolver _gatewayResolver;
     private readonly IOutboxWriter _outbox;
+    private readonly ILedgerWriter _ledger;
     private readonly IDistributedLock _distributedLock;
     private readonly IClock _clock;
 
@@ -23,6 +24,7 @@ public sealed class WebhookService
         IWebhookSignatureVerifier signatureVerifier,
         IPaymentGatewayResolver gatewayResolver,
         IOutboxWriter outbox,
+        ILedgerWriter ledger,
         IDistributedLock distributedLock,
         IClock clock)
     {
@@ -31,6 +33,7 @@ public sealed class WebhookService
         _signatureVerifier = signatureVerifier;
         _gatewayResolver = gatewayResolver;
         _outbox = outbox;
+        _ledger = ledger;
         _distributedLock = distributedLock;
         _clock = clock;
     }
@@ -80,11 +83,17 @@ public sealed class WebhookService
             webhook.ProviderReference,
             cancellationToken) ?? throw new InvalidWebhookPayloadException(
                 "No payment matches the webhook provider reference.");
+        var operation = payment.StartOperation(
+            PaymentOperationType.Reconcile,
+            $"{normalizedProvider}:{webhook.Id}",
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))),
+            _clock.UtcNow);
 
         switch (webhook.Type.ToLowerInvariant())
         {
             case "payment.captured" when payment.Status == PaymentStatus.Authorized:
                 payment.Capture(payment.AmountMinor, _clock.UtcNow);
+                await _ledger.RecordCaptureAsync(payment, _clock.UtcNow, cancellationToken);
                 break;
             case "payment.failed" when payment.Status is PaymentStatus.Pending or PaymentStatus.Authorized:
                 payment.MarkFailed(
@@ -98,11 +107,13 @@ public sealed class WebhookService
                 throw new InvalidWebhookPayloadException($"Webhook event type '{webhook.Type}' is not supported.");
         }
 
+        operation.Succeed(webhook.ProviderReference, _clock.UtcNow);
+
         _inbox.Add(
             normalizedProvider,
             webhook.Id,
             webhook.Type,
-            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))),
+            operation.RequestHash,
             _clock.UtcNow);
         _outbox.Add(
             "provider.webhook-processed.v1",

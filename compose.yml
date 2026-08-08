@@ -9,9 +9,13 @@ services:
       ASPNETCORE_ENVIRONMENT: Development
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=sentinelpay;Username=sentinelpay;Password=${SENTINELPAY_DB_PASSWORD:?required}
       ConnectionStrings__Redis: redis:6379,abortConnect=false
+      ConnectionStrings__RabbitMq: amqp://sentinelpay:${SENTINELPAY_RABBITMQ_PASSWORD:?required}@rabbitmq:5672/
       Database__InitializeOnStartup: "true"
+      DevelopmentMerchant__Seed: "true"
+      DevelopmentMerchant__ApiKey: ${SENTINELPAY_API_KEY:?required}
       Redis__Enabled: "true"
       Outbox__DispatcherEnabled: "true"
+      Messaging__Provider: RabbitMq
       Webhooks__mock-bank__Secret: ${SENTINELPAY_MOCK_BANK_WEBHOOK_SECRET:?required}
       Webhooks__sandbox-wallet__Secret: ${SENTINELPAY_SANDBOX_WALLET_WEBHOOK_SECRET:?required}
     ports:
@@ -21,10 +25,25 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     read_only: true
     tmpfs:
       - /tmp
     restart: unless-stopped
+
+  loadtest:
+    image: grafana/k6:1.0.0
+    profiles: ["loadtest"]
+    environment:
+      BASE_URL: http://api:8080
+      API_KEY: ${SENTINELPAY_API_KEY:?required}
+    volumes:
+      - ./load-tests:/scripts:ro
+    command: ["run", "/scripts/payment-lifecycle.js"]
+    depends_on:
+      api:
+        condition: service_started
 
   postgres:
     image: postgres:18-alpine
@@ -57,6 +76,24 @@ services:
       retries: 10
     restart: unless-stopped
 
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: sentinelpay
+      RABBITMQ_DEFAULT_PASS: ${SENTINELPAY_RABBITMQ_PASSWORD:?required}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - sentinelpay-rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
 volumes:
   sentinelpay-postgres:
   sentinelpay-redis:
+  sentinelpay-rabbitmq:

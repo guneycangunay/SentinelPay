@@ -3,6 +3,7 @@ namespace SentinelPay.Domain.Payments;
 public sealed class Payment
 {
     private readonly List<Refund> _refunds = [];
+    private readonly List<PaymentOperation> _operations = [];
 
     private Payment()
     {
@@ -10,6 +11,7 @@ public sealed class Payment
 
     private Payment(
         Guid id,
+        Guid merchantId,
         string merchantReference,
         long amountMinor,
         string currency,
@@ -19,6 +21,7 @@ public sealed class Payment
         DateTimeOffset createdAt)
     {
         Id = id;
+        MerchantId = merchantId;
         MerchantReference = merchantReference;
         AmountMinor = amountMinor;
         Currency = currency;
@@ -31,6 +34,7 @@ public sealed class Payment
     }
 
     public Guid Id { get; private set; }
+    public Guid MerchantId { get; private set; }
     public string MerchantReference { get; private set; } = string.Empty;
     public long AmountMinor { get; private set; }
     public string Currency { get; private set; } = string.Empty;
@@ -49,8 +53,10 @@ public sealed class Payment
     public DateTimeOffset? CapturedAt { get; private set; }
     public uint Version { get; private set; }
     public IReadOnlyCollection<Refund> Refunds => _refunds.AsReadOnly();
+    public IReadOnlyCollection<PaymentOperation> Operations => _operations.AsReadOnly();
 
     public static Payment Create(
+        Guid merchantId,
         string merchantReference,
         long amountMinor,
         string currency,
@@ -84,8 +90,14 @@ public sealed class Payment
             throw new DomainException("Idempotency key is required.");
         }
 
+        if (merchantId == Guid.Empty)
+        {
+            throw new DomainException("Merchant id is required.");
+        }
+
         return new Payment(
             Guid.NewGuid(),
+            merchantId,
             merchantReference.Trim(),
             amountMinor,
             currency.ToUpperInvariant(),
@@ -93,6 +105,35 @@ public sealed class Payment
             idempotencyKey.Trim(),
             requestHash,
             now);
+    }
+
+    public PaymentOperation StartOperation(
+        PaymentOperationType type,
+        string idempotencyKey,
+        string requestHash,
+        DateTimeOffset now)
+    {
+        if (string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            throw new DomainException("Operation idempotency key is required.");
+        }
+
+        if (_operations.Any(operation =>
+                operation.Type == type && operation.IdempotencyKey == idempotencyKey))
+        {
+            throw new DomainException("The payment operation already exists.");
+        }
+
+        var operation = new PaymentOperation(
+            Guid.NewGuid(),
+            MerchantId,
+            Id,
+            type,
+            idempotencyKey.Trim(),
+            requestHash,
+            now);
+        _operations.Add(operation);
+        return operation;
     }
 
     public void MarkAuthorized(string providerReference, DateTimeOffset now)
@@ -140,16 +181,7 @@ public sealed class Payment
         string requestHash,
         DateTimeOffset now)
     {
-        if (Status is not (PaymentStatus.Captured or PaymentStatus.PartiallyRefunded))
-        {
-            throw new DomainException($"A payment in '{Status}' state cannot be refunded.");
-        }
-
-        var remaining = CapturedAmountMinor - RefundedAmountMinor;
-        if (amountMinor <= 0 || amountMinor > remaining)
-        {
-            throw new DomainException($"Refund amount must be between 1 and {remaining} minor units.");
-        }
+        EnsureCanRefund(amountMinor);
 
         if (string.IsNullOrWhiteSpace(idempotencyKey))
         {
@@ -171,6 +203,20 @@ public sealed class Payment
             : PaymentStatus.PartiallyRefunded;
         UpdatedAt = now;
         return refund;
+    }
+
+    public void EnsureCanRefund(long amountMinor)
+    {
+        if (Status is not (PaymentStatus.Captured or PaymentStatus.PartiallyRefunded))
+        {
+            throw new DomainException($"A payment in '{Status}' state cannot be refunded.");
+        }
+
+        var remaining = CapturedAmountMinor - RefundedAmountMinor;
+        if (amountMinor <= 0 || amountMinor > remaining)
+        {
+            throw new DomainException($"Refund amount must be between 1 and {remaining} minor units.");
+        }
     }
 
     private void EnsureStatus(PaymentStatus expected)

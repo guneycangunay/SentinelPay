@@ -4,6 +4,13 @@ namespace SentinelPay.Infrastructure.Payments;
 
 public sealed class SandboxWalletGateway : IPaymentGateway
 {
+    private readonly SandboxGatewayStateStore _stateStore;
+
+    public SandboxWalletGateway(SandboxGatewayStateStore stateStore)
+    {
+        _stateStore = stateStore;
+    }
+
     public string Name => "sandbox-wallet";
 
     public async Task<GatewayAuthorizationResult> AuthorizeAsync(
@@ -17,11 +24,13 @@ public sealed class SandboxWalletGateway : IPaymentGateway
             return new GatewayAuthorizationResult(false, null, "wallet_locked", "The wallet is locked.");
         }
 
-        return new GatewayAuthorizationResult(
+        var result = new GatewayAuthorizationResult(
             true,
             DeterministicReference.Create("sw_auth", request.IdempotencyKey),
             null,
             null);
+        _stateStore.SetState(result.ProviderReference!, GatewayPaymentState.Authorized);
+        return result;
     }
 
     public async Task<GatewayOperationResult> CaptureAsync(
@@ -29,6 +38,7 @@ public sealed class SandboxWalletGateway : IPaymentGateway
         CancellationToken cancellationToken)
     {
         await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
+        _stateStore.SetState(request.ProviderReference, GatewayPaymentState.Captured);
         return new GatewayOperationResult(true, null, null);
     }
 
@@ -47,5 +57,5 @@ public sealed class SandboxWalletGateway : IPaymentGateway
     public Task<GatewayPaymentStatusResult> GetStatusAsync(
         string providerReference,
         CancellationToken cancellationToken) =>
-        Task.FromResult(new GatewayPaymentStatusResult(GatewayPaymentState.Authorized, null, null));
+        Task.FromResult(_stateStore.GetState(providerReference));
 }

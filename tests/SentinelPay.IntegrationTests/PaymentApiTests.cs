@@ -3,12 +3,18 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
+using SentinelPay.Domain.Merchants;
+using SentinelPay.Infrastructure.Persistence;
+using SentinelPay.Infrastructure.Security;
 using Testcontainers.PostgreSql;
 
 namespace SentinelPay.IntegrationTests;
 
 public sealed class PaymentApiTests : IAsyncLifetime
 {
+    private const string SecondMerchantApiKey = "sp_test_second_merchant_f3a91c";
+    private static readonly Guid SecondMerchantId = Guid.Parse("75aa29da-7fbb-4ac6-8e1f-ad4aeeea9822");
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:18-alpine")
         .WithDatabase("sentinelpay_tests")
         .WithUsername("sentinelpay")
@@ -22,6 +28,8 @@ public sealed class PaymentApiTests : IAsyncLifetime
         await _postgres.StartAsync();
         _factory = new SentinelPayApiFactory(_postgres.GetConnectionString());
         _client = _factory.CreateClient();
+        _client.DefaultRequestHeaders.Add("X-Api-Key", SentinelPayApiFactory.DevelopmentApiKey);
+        await SeedSecondMerchantAsync();
     }
 
     public async ValueTask DisposeAsync()
@@ -33,6 +41,17 @@ public sealed class PaymentApiTests : IAsyncLifetime
         }
 
         await _postgres.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ProtectedEndpoint_RejectsMissingMerchantCredential()
+    {
+        using var anonymousClient = _factory?.CreateClient()
+            ?? throw new InvalidOperationException("Test fixture is not initialized.");
+
+        using var response = await anonymousClient.GetAsync("/api/v1/providers");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     [Fact]
@@ -53,6 +72,25 @@ public sealed class PaymentApiTests : IAsyncLifetime
         var firstId = (await ReadJsonAsync(first)).RootElement.GetProperty("id").GetGuid();
         var secondId = (await ReadJsonAsync(second)).RootElement.GetProperty("id").GetGuid();
         Assert.Equal(firstId, secondId);
+    }
+
+    [Fact]
+    public async Task Merchant_CannotReadAnotherMerchantsPayment()
+    {
+        using var createMessage = CreatePost(
+            "/api/v1/payments",
+            CreateRequest("order-tenant-isolation-1"),
+            "create-tenant-isolation-0001");
+        using var createResponse = await Client.SendAsync(createMessage);
+        var paymentId = (await ReadJsonAsync(createResponse)).RootElement.GetProperty("id").GetGuid();
+
+        using var crossTenantRequest = new HttpRequestMessage(
+            HttpMethod.Get,
+            $"/api/v1/payments/{paymentId}");
+        crossTenantRequest.Headers.Add("X-Api-Key", SecondMerchantApiKey);
+        using var response = await Client.SendAsync(crossTenantRequest);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
@@ -125,6 +163,31 @@ public sealed class PaymentApiTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task TransientProviderFailure_ResumesPersistedOperationWithSameKey()
+    {
+        var request = new
+        {
+            merchantReference = "order-transient-1",
+            amountMinor = 7_500,
+            currency = "EUR",
+            provider = "mock-bank",
+            paymentMethodToken = "tok_transient_once"
+        };
+        using var firstMessage = CreatePost("/api/v1/payments", request, "create-transient-0001");
+        using var first = await Client.SendAsync(firstMessage);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, first.StatusCode);
+
+        using var retryMessage = CreatePost("/api/v1/payments", request, "create-transient-0001");
+        using var retry = await Client.SendAsync(retryMessage);
+
+        Assert.Equal(HttpStatusCode.Created, retry.StatusCode);
+        var json = await ReadJsonAsync(retry);
+        Assert.Equal("Authorized", json.RootElement.GetProperty("status").GetString());
+        var operation = json.RootElement.GetProperty("operations").EnumerateArray().Single();
+        Assert.Equal("Succeeded", operation.GetProperty("status").GetString());
+    }
+
+    [Fact]
     public async Task SignedWebhook_IsProcessedOnceAndReplayedSafely()
     {
         using var createMessage = CreatePost(
@@ -156,6 +219,70 @@ public sealed class PaymentApiTests : IAsyncLifetime
         Assert.Equal("Captured", payment.RootElement.GetProperty("status").GetString());
     }
 
+    [Fact]
+    public async Task SignedWebhook_RejectsExpiredSignature()
+    {
+        const string payload = "{\"id\":\"evt_expired\",\"type\":\"payment.captured\",\"providerReference\":\"missing\"}";
+        using var message = CreateWebhookPost(payload, DateTimeOffset.UtcNow.AddMinutes(-10));
+
+        using var response = await Client.SendAsync(message);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CaptureRefundAndSettlement_KeepLedgerBalanced()
+    {
+        using var createMessage = CreatePost(
+            "/api/v1/payments",
+            CreateRequest("order-ledger-1", amountMinor: 8_000),
+            "create-ledger-0001");
+        using var createResponse = await Client.SendAsync(createMessage);
+        var paymentId = (await ReadJsonAsync(createResponse)).RootElement.GetProperty("id").GetGuid();
+
+        using var captureMessage = CreatePost(
+            $"/api/v1/payments/{paymentId}/capture",
+            body: null,
+            "capture-ledger-0001");
+        using var captureResponse = await Client.SendAsync(captureMessage);
+        Assert.Equal(HttpStatusCode.OK, captureResponse.StatusCode);
+
+        using var refundMessage = CreatePost(
+            $"/api/v1/payments/{paymentId}/refunds",
+            new { amountMinor = 2_000 },
+            "refund-ledger-0001");
+        using var refundResponse = await Client.SendAsync(refundMessage);
+        Assert.Equal(HttpStatusCode.OK, refundResponse.StatusCode);
+
+        using var balancesBefore = await Client.GetAsync("/api/v1/ledger/balances?currency=EUR");
+        var before = await ReadJsonAsync(balancesBefore);
+        var payableBefore = before.RootElement.EnumerateArray()
+            .Single(item => item.GetProperty("account").GetString() == "MerchantPayable")
+            .GetProperty("netMinor")
+            .GetInt64();
+        Assert.True(payableBefore >= 6_000);
+
+        using var settlementMessage = CreatePost(
+            "/api/v1/settlements",
+            new { currency = "EUR", periodEnd = DateTimeOffset.UtcNow.AddMinutes(1) },
+            "settle-ledger-0001");
+        using var settlementResponse = await Client.SendAsync(settlementMessage);
+        Assert.Equal(HttpStatusCode.Created, settlementResponse.StatusCode);
+
+        using var balancesAfter = await Client.GetAsync("/api/v1/ledger/balances?currency=EUR");
+        var after = await ReadJsonAsync(balancesAfter);
+        var payableAfter = after.RootElement.EnumerateArray()
+            .Single(item => item.GetProperty("account").GetString() == "MerchantPayable")
+            .GetProperty("netMinor")
+            .GetInt64();
+        Assert.Equal(0, payableAfter);
+
+        foreach (var journal in await GetJournalsAsync())
+        {
+            Assert.False(string.IsNullOrWhiteSpace(journal.GetProperty("externalReference").GetString()));
+        }
+    }
+
     private HttpClient Client => _client ?? throw new InvalidOperationException("Test fixture is not initialized.");
 
     private static object CreateRequest(string merchantReference, long amountMinor = 12_990) => new
@@ -179,18 +306,45 @@ public sealed class PaymentApiTests : IAsyncLifetime
         return message;
     }
 
-    private static HttpRequestMessage CreateWebhookPost(string payload)
+    private static HttpRequestMessage CreateWebhookPost(string payload, DateTimeOffset? signedAt = null)
     {
         const string secret = "${SENTINELPAY_TEST_SIGNING_MATERIAL}";
+        var timestamp = (signedAt ?? DateTimeOffset.UtcNow).ToUnixTimeSeconds();
         var signature = Convert.ToHexString(HMACSHA256.HashData(
             Encoding.UTF8.GetBytes(secret),
-            Encoding.UTF8.GetBytes(payload)));
+            Encoding.UTF8.GetBytes($"{timestamp}.{payload}")));
         var message = new HttpRequestMessage(HttpMethod.Post, "/api/v1/webhooks/mock-bank")
         {
             Content = new StringContent(payload, Encoding.UTF8, "application/json")
         };
-        message.Headers.Add("X-SentinelPay-Signature", signature);
+        message.Headers.Add("X-SentinelPay-Signature", $"t={timestamp},v1={signature}");
         return message;
+    }
+
+    private async Task<JsonElement[]> GetJournalsAsync()
+    {
+        using var response = await Client.GetAsync("/api/v1/ledger/journals?limit=100");
+        var json = await ReadJsonAsync(response);
+        return json.RootElement.EnumerateArray().Select(item => item.Clone()).ToArray();
+    }
+
+    private async Task SeedSecondMerchantAsync()
+    {
+        var factory = _factory ?? throw new InvalidOperationException("Test fixture is not initialized.");
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<SentinelPayDbContext>();
+        await dbContext.Merchants.AddAsync(
+            Merchant.Create(SecondMerchantId, "Second Merchant", DateTimeOffset.UtcNow));
+        await dbContext.ApiKeyCredentials.AddAsync(new ApiKeyCredential
+        {
+            Id = Guid.NewGuid(),
+            MerchantId = SecondMerchantId,
+            Name = "integration-test-key",
+            KeyHash = ApiKeyHasher.Hash(SecondMerchantApiKey),
+            Scopes = "payments:read payments:write ledger:read settlements:read settlements:write",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        await dbContext.SaveChangesAsync();
     }
 
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response) =>

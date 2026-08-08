@@ -1,5 +1,6 @@
 using SentinelPay.Application.Abstractions;
 using SentinelPay.Application.Payments;
+using SentinelPay.Api.Security;
 
 namespace SentinelPay.Api.Endpoints;
 
@@ -15,30 +16,35 @@ public static class PaymentEndpoints
             .WithSummary("Authorize a new payment")
             .Produces<PaymentResponse>(StatusCodes.Status201Created)
             .ProducesProblem(StatusCodes.Status409Conflict)
-            .ProducesProblem(StatusCodes.Status422UnprocessableEntity);
+            .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+            .RequireAuthorization(SentinelPayPolicies.PaymentsWrite);
 
         group.MapGet("/{paymentId:guid}", GetPaymentAsync)
             .WithName("GetPayment")
             .WithSummary("Get the current payment state")
             .Produces<PaymentResponse>()
-            .ProducesProblem(StatusCodes.Status404NotFound);
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .RequireAuthorization(SentinelPayPolicies.PaymentsRead);
 
         group.MapPost("/{paymentId:guid}/capture", CapturePaymentAsync)
             .WithName("CapturePayment")
             .WithSummary("Capture a previously authorized payment")
             .Produces<PaymentResponse>()
-            .ProducesProblem(StatusCodes.Status422UnprocessableEntity);
+            .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+            .RequireAuthorization(SentinelPayPolicies.PaymentsWrite);
 
         group.MapPost("/{paymentId:guid}/refunds", RefundPaymentAsync)
             .WithName("RefundPayment")
             .WithSummary("Partially or fully refund a captured payment")
             .Produces<PaymentResponse>()
-            .ProducesProblem(StatusCodes.Status422UnprocessableEntity);
+            .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+            .RequireAuthorization(SentinelPayPolicies.PaymentsWrite);
 
         endpoints.MapGet("/api/v1/providers", (IPaymentGatewayResolver resolver) =>
                 Results.Ok(new { providers = resolver.GetProviderNames() }))
             .WithTags("Providers")
-            .WithName("ListProviders");
+            .WithName("ListProviders")
+            .RequireAuthorization(SentinelPayPolicies.PaymentsRead);
 
         endpoints.MapPost("/api/v1/webhooks/{provider}", HandleWebhookAsync)
             .WithTags("Webhooks")
@@ -78,6 +84,7 @@ public static class PaymentEndpoints
         var idempotencyKey = RequireIdempotencyKey(context);
         var result = await paymentService.CreateAsync(
             new CreatePaymentCommand(
+                context.GetMerchantId(),
                 request.MerchantReference,
                 request.AmountMinor,
                 request.Currency,
@@ -94,9 +101,10 @@ public static class PaymentEndpoints
 
     private static async Task<IResult> GetPaymentAsync(
         Guid paymentId,
+        HttpContext context,
         PaymentService paymentService,
         CancellationToken cancellationToken) =>
-        Results.Ok(await paymentService.GetAsync(paymentId, cancellationToken));
+        Results.Ok(await paymentService.GetAsync(context.GetMerchantId(), paymentId, cancellationToken));
 
     private static async Task<IResult> CapturePaymentAsync(
         Guid paymentId,
@@ -105,7 +113,7 @@ public static class PaymentEndpoints
         CancellationToken cancellationToken)
     {
         var result = await paymentService.CaptureAsync(
-            new CapturePaymentCommand(paymentId, RequireIdempotencyKey(context)),
+            new CapturePaymentCommand(context.GetMerchantId(), paymentId, RequireIdempotencyKey(context)),
             cancellationToken);
         SetReplayHeader(context, result.IsReplay);
         return Results.Ok(result.Payment);
@@ -119,7 +127,11 @@ public static class PaymentEndpoints
         CancellationToken cancellationToken)
     {
         var result = await paymentService.RefundAsync(
-            new RefundPaymentCommand(paymentId, request.AmountMinor, RequireIdempotencyKey(context)),
+            new RefundPaymentCommand(
+                context.GetMerchantId(),
+                paymentId,
+                request.AmountMinor,
+                RequireIdempotencyKey(context)),
             cancellationToken);
         SetReplayHeader(context, result.IsReplay);
         return Results.Ok(result.Payment);
@@ -133,7 +145,7 @@ public static class PaymentEndpoints
             throw new IdempotencyConflictException("The Idempotency-Key header is required.");
         }
 
-        return value;
+        return value.Trim();
     }
 
     private static void SetReplayHeader(HttpContext context, bool isReplay)

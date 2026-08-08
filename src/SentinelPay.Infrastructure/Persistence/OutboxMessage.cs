@@ -11,4 +11,7 @@ public sealed class OutboxMessage
     public DateTimeOffset? NextAttemptAt { get; set; }
     public int AttemptCount { get; set; }
     public string? LastError { get; set; }
+    public string? LockedBy { get; set; }
+    public DateTimeOffset? LockedUntil { get; set; }
+    public DateTimeOffset? DeadLetteredAt { get; set; }
 }
