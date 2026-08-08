@@ -7,6 +7,7 @@ using OpenTelemetry.Trace;
 using SentinelPay.Api.Endpoints;
 using SentinelPay.Api.Infrastructure;
 using SentinelPay.Api.Security;
+using SentinelPay.Application.Payments;
 using SentinelPay.Infrastructure;
 using SentinelPay.Infrastructure.Persistence;
 
